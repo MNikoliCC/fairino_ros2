@@ -116,13 +116,31 @@ load_source_image() {
   SIMMACHINE_BASE_IMAGE="${loaded_image}"
 }
 
+detect_host_display() {
+  local socket
+
+  if [[ -n "${DISPLAY:-}" ]]; then
+    printf '%s\n' "${DISPLAY}"
+    return
+  fi
+
+  socket="$(find /tmp/.X11-unix -maxdepth 1 -type s -name 'X*' -print 2>/dev/null | sort -V | tail -n 1)"
+  if [[ -n "${socket}" ]]; then
+    printf ':%s\n' "${socket##*X}"
+  else
+    printf ':0\n'
+  fi
+}
+
 write_env_file() {
-  local temporary="${ENV_FILE}.tmp"
+  local temporary="${ENV_FILE}.tmp" x_display
+  x_display="$(detect_host_display)"
 
   {
     printf 'SIMMACHINE_VERSION=%s\n' "${SIMMACHINE_VERSION}"
     printf 'SIMMACHINE_IMAGE=fairino-simmachine:%s\n' "${SIMMACHINE_VERSION}"
     printf 'SIMMACHINE_IP=192.168.58.2\n'
+    printf 'HOST_DISPLAY=%s\n' "${x_display}"
   } >"${temporary}"
   mv -- "${temporary}" "${ENV_FILE}"
 }

@@ -25,7 +25,7 @@ fairino-simmachine-v3.9.9
 ## Start SimMachine
 
 ```bash
-cd /home/nikolic/colcon_ws/src/fairino_ros2/docker
+cd ~/colcon_ws/src/fairino_ros2/docker
 ./simmachine.sh up
 ```
 
@@ -102,7 +102,7 @@ the parent `fairino_ros2` repository.
 Allow local Docker containers to use the X server before opening RViz:
 
 ```bash
-xhost +local:docker
+xhost +si:localuser:root
 ```
 
 Open a shell in the ROS 2 container:
@@ -111,21 +111,16 @@ Open a shell in the ROS 2 container:
 docker compose exec ros2 bash
 ```
 
-ROS 2 Humble and `/ros2_ws/install/setup.bash` are sourced automatically in every
-new Bash shell. Start the retained FAIRINO command server with:
+Choose the MoveIt hardware backend explicitly:
 
 ```bash
-ros2 run fairino_hardware_v3_9_9 ros2_cmd_server
+# Safe mock hardware
+ros2 launch fairino20_v6_moveit2_config demo.launch.py use_mock_hardware:=true
+
+# FAIRINO SDK hardware connected to 192.168.58.2; this is also the default
+ros2 launch fairino20_v6_moveit2_config demo.launch.py use_mock_hardware:=false
 ```
 
-In a second container shell, start the current MoveIt demo:
+When `use_mock_hardware` is `true`, ros2_control loads `mock_components/GenericSystem`; when it is `false`, it loads `fairino_hardware/FairinoHardwareInterface` and sends executed trajectories to the controller.
 
-```bash
-docker compose exec ros2 bash
-ros2 launch fairino20_v6_moveit2_config demo.launch.py
-```
-
-The current MoveIt configuration uses ros2_control's `GenericSystem` mock
-hardware. It validates MoveIt, RViz, and controllers, but does not command the
-SimMachine robot until the configuration is switched to the retained FAIRINO
-hardware plugin.
+The optional `ros2_cmd_server` exposes `/fairino_remote_command_service` for direct string-based FAIRINO SDK commands, so the user can choose it independently of the MoveIt hardware path.

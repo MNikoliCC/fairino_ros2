@@ -18,8 +18,8 @@ uses the ROS 2 image's default middleware.
 ## Build and Start Both Containers
 
 ```bash
-cd /home/nikolic/colcon_ws/src/fairino_ros2/docker
-xhost +local:docker
+cd ~/docker
+xhost +si:localuser:root
 ./simmachine.sh up
 ```
 
@@ -36,7 +36,7 @@ The FAIRINO WebApp is available at <http://192.168.58.2> using `admin` / `123`.
 ## Open a Sourced ROS 2 Shell
 
 ```bash
-cd /home/nikolic/colcon_ws/src/fairino_ros2/docker
+cd ~/colcon_ws/src/fairino_ros2/docker
 docker compose exec ros2 bash
 ```
 
@@ -47,26 +47,24 @@ Every Bash shell automatically sources both:
 /ros2_ws/install/setup.bash
 ```
 
-## Run the FAIRINO Server and MoveIt
+## Run MoveIt with Selectable Hardware
 
-Open the first ROS 2 shell and start the FAIRINO command server:
-
-```bash
-ros2 run fairino_hardware_v3_9_9 ros2_cmd_server
-```
-
-Open a second host terminal and start MoveIt:
+Open a sourced ROS 2 shell and choose the hardware backend explicitly:
 
 ```bash
-cd /home/nikolic/colcon_ws/src/fairino_ros2/docker
+cd ~/colcon_ws/src/fairino_ros2/docker
 docker compose exec ros2 bash
-ros2 launch fairino20_v6_moveit2_config demo.launch.py
+
+# Safe mock hardware; this is also the default
+ros2 launch fairino20_v6_moveit2_config demo.launch.py use_mock_hardware:=true
+
+# FAIRINO SDK hardware connected to 192.168.58.2
+ros2 launch fairino20_v6_moveit2_config demo.launch.py use_mock_hardware:=false
 ```
 
-Important: the retained MoveIt configuration currently uses
-`mock_components/GenericSystem`. The demo verifies the ROS 2/MoveIt/controller
-stack, but planned trajectories do not yet command SimMachine through the
-FAIRINO hardware plugin.
+When `use_mock_hardware` is `true`, ros2_control loads `mock_components/GenericSystem`; when it is `false`, it loads `fairino_hardware/FairinoHardwareInterface` and sends executed trajectories to the controller.
+
+The optional `ros2_cmd_server` exposes `/fairino_remote_command_service` for direct string-based FAIRINO SDK commands, so the user can choose it independently of the MoveIt hardware path.
 
 ## Stop or Delete the Stack
 
