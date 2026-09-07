@@ -1,0 +1,3 @@
+.env
+SimMachine/*
+!SimMachine/.gitkeep

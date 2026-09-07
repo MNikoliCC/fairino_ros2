@@ -1,0 +1,52 @@
+name: fairino-simmachine
+
+services:
+  simmachine:
+    image: ${SIMMACHINE_IMAGE:?Run ./simmachine.sh up first}
+    container_name: fairino-simmachine-v${SIMMACHINE_VERSION}
+    privileged: true
+    user: root
+    restart: unless-stopped
+    networks:
+      fairino-net:
+        ipv4_address: ${SIMMACHINE_IP:-192.168.58.2}
+
+  ros2:
+    build:
+      context: .
+      dockerfile: Dockerfile.ros2
+    image: fairino-ros2-humble:local
+    container_name: fairino-ros2-humble
+    depends_on:
+      - simmachine
+    environment:
+      DISPLAY: ${DISPLAY:-:0}
+      QT_X11_NO_MITSHM: "1"
+    stdin_open: true
+    tty: true
+    volumes:
+      - ..:/ros2_ws/src/fairino_ros2:ro
+      - ros2-build:/ros2_ws/build
+      - ros2-install:/ros2_ws/install
+      - ros2-log:/ros2_ws/log
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    networks:
+      fairino-net:
+        ipv4_address: 192.168.58.3
+
+networks:
+  fairino-net:
+    name: fairino-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.58.0/24
+          gateway: 192.168.58.1
+
+volumes:
+  ros2-build:
+    name: fairino-ros2-build
+  ros2-install:
+    name: fairino-ros2-install
+  ros2-log:
+    name: fairino-ros2-log
