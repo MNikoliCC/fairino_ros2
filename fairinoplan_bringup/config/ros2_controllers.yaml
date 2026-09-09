@@ -1,0 +1,30 @@
+controller_manager:
+  ros__parameters:
+    # FAIRINO hardware implementation sends ServoJ with cmdT=0.008 s.
+    # 125 Hz keeps ros2_control's update period aligned with that command period.
+    update_rate: 125
+
+    fairino20_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+fairino20_controller:
+  ros__parameters:
+    joints:
+      - j1
+      - j2
+      - j3
+      - j4
+      - j5
+      - j6
+
+    command_interfaces:
+      - position
+
+    state_interfaces:
+      - position
+
+    allow_partial_joints_goal: false
+    open_loop_control: false

@@ -39,6 +39,7 @@ services:
       - ../fairino_hardware_v3_9_9:/ros2_ws/src/fairino_hardware_v3_9_9:ro
       - ../fairino_msgs:/ros2_ws/src/fairino_msgs:ro
       - ../roboplan-ros:/ros2_ws/src/roboplan_ros:ro
+      - ../fairinoplan_bringup:/ros2_ws/src/fairinoplan_bringup:ro
       - ros2-build:/ros2_ws/build
       - ros2-install:/ros2_ws/install
       - ros2-log:/ros2_ws/log

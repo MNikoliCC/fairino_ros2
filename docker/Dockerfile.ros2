@@ -44,31 +44,48 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # RoboPlan Core is an immutable underlay in the image. Only the two packages
-# required by the ROS wrappers are built; planners and example models are not.
+# required by the ROS wrappers and planers are built; example models are not.
 RUN mkdir -p /opt/roboplan_ws/src \
     && git clone https://github.com/open-planning/roboplan.git /opt/roboplan_ws/src/roboplan \
     && git -C /opt/roboplan_ws/src/roboplan checkout "${ROBOPLAN_VERSION}" \
-    && for ignored_package in roboplan_cartesian_planning roboplan_example_models roboplan_examples roboplan_oink roboplan_rrt roboplan_toppra; do \
+    \
+    && for ignored_package in \
+         roboplan_cartesian_planning \
+         roboplan_example_models \
+         roboplan_examples \
+         roboplan_oink; do \
          touch "/opt/roboplan_ws/src/roboplan/${ignored_package}/COLCON_IGNORE"; \
        done \
+    \
     && source "/opt/ros/${ROS_DISTRO}/setup.bash" \
     && apt-get update \
     && rosdep install \
          --from-paths \
            /opt/roboplan_ws/src/roboplan/roboplan \
            /opt/roboplan_ws/src/roboplan/roboplan_simple_ik \
+           /opt/roboplan_ws/src/roboplan/roboplan_rrt \
+           /opt/roboplan_ws/src/roboplan/roboplan_toppra \
          --ignore-src \
          --rosdistro "${ROS_DISTRO}" \
          -t build \
          --as-root pip:false \
          -y \
+    \
     && cd /opt/roboplan_ws \
     && colcon build \
-         --packages-select roboplan roboplan_simple_ik \
+         --packages-up-to \
+           roboplan_simple_ik \
+           roboplan_rrt \
+           roboplan_toppra \
          --cmake-args \
            -DBUILD_TESTING=OFF \
            -DGENERATE_PYTHON_STUBS=OFF \
-    && rm -rf /opt/roboplan_ws/build /opt/roboplan_ws/log /var/lib/apt/lists/*
+    \
+    && rm -rf \
+         /opt/roboplan_ws/build \
+         /opt/roboplan_ws/log \
+         /var/lib/apt/lists/*
+
 
 RUN groupadd --gid "${ROS_GID}" ros \
     && useradd --uid "${ROS_UID}" --gid "${ROS_GID}" --create-home --shell /bin/bash ros \

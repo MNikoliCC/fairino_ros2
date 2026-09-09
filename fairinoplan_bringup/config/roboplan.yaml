@@ -1,0 +1,28 @@
+# RoboPlan dynamics configuration.
+#
+# Velocity limits are already read from the URDF.
+# RoboPlan/TOPP-RA also needs acceleration limits.
+#
+# FAIRINO's MoveIt config does not provide real acceleration limits, so these
+# are intentionally conservative starter values. Verify/tune them against the
+# FR20 controller/manual before increasing them on the real robot.
+
+joint_limits:
+  j1:
+    max_acceleration: [1.0]
+    max_jerk: [5.0]
+  j2:
+    max_acceleration: [1.0]
+    max_jerk: [5.0]
+  j3:
+    max_acceleration: [1.0]
+    max_jerk: [5.0]
+  j4:
+    max_acceleration: [1.0]
+    max_jerk: [5.0]
+  j5:
+    max_acceleration: [1.0]
+    max_jerk: [5.0]
+  j6:
+    max_acceleration: [1.0]
+    max_jerk: [5.0]

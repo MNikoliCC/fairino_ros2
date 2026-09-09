@@ -279,6 +279,15 @@ main() {
       say "fairino-ros2-${ROS_IMAGE_DISTRO} is running."
       say "Web interface: http://192.168.58.2 (admin / 123)"
       ;;
+    rebuild)
+      prepare
+      say "Rebuilding ROS 2 image..."
+      compose build
+      compose up --detach --force-recreate
+      say "fairino-simmachine-v${SIMMACHINE_VERSION} is running."
+      say "fairino-ros2-${ROS_IMAGE_DISTRO} is running."
+      say "Web interface: http://192.168.58.2 (admin / 123)"
+      ;;
     down)
       [[ -f "${ENV_FILE}" ]] || die ".env does not exist; SimMachine has not been prepared yet."
       compose down
