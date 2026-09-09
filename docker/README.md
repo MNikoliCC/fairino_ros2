@@ -97,13 +97,8 @@ To change the robot model in the SimMachine WebApp:
 
 `./simmachine.sh up` starts both SimMachine and the ROS 2 Humble container. The
 ROS workspace is built automatically from the packages mounted from
-the parent `fairino_ros2` repository.
-
-Allow local Docker containers to use the X server before opening RViz:
-
-```bash
-xhost +si:localuser:root
-```
+the parent `fairino_ros2` repository. The container runs as the non-root `ros`
+user with the host user's numeric UID and GID.
 
 Open a shell in the ROS 2 container:
 

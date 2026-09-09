@@ -1,5 +1,8 @@
 FROM ros:humble-ros-base-jammy
 
+ARG ROS_UID=1000
+ARG ROS_GID=1000
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,6 +31,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-humble-xacro \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd --gid "${ROS_GID}" ros \
+    && useradd --uid "${ROS_UID}" --gid "${ROS_GID}" --create-home --shell /bin/bash ros \
+    && mkdir -p /ros2_ws/build /ros2_ws/install /ros2_ws/log /ros2_ws/src \
+    && chown -R "${ROS_UID}:${ROS_GID}" /ros2_ws /home/ros
+
 COPY ros2_entrypoint.sh /ros2_entrypoint.sh
 
 RUN chmod +x /ros2_entrypoint.sh \
@@ -36,6 +44,9 @@ RUN chmod +x /ros2_entrypoint.sh \
       '[ ! -f /ros2_ws/install/setup.bash ] || source /ros2_ws/install/setup.bash' \
       >> /etc/bash.bashrc
 
+ENV HOME=/home/ros
+
+USER ros
 WORKDIR /ros2_ws
 ENTRYPOINT ["/ros2_entrypoint.sh"]
 CMD ["bash", "-lc", "sleep infinity"]

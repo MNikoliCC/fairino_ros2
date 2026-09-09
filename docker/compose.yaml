@@ -15,12 +15,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ros2
+      args:
+        ROS_UID: ${HOST_UID:-1000}
+        ROS_GID: ${HOST_GID:-1000}
     image: fairino-ros2-humble:local
     container_name: fairino-ros2-humble
     depends_on:
       - simmachine
     environment:
-      DISPLAY: ${HOST_DISPLAY:-:0}
+      DISPLAY: ${DISPLAY}
       LIBGL_ALWAYS_SOFTWARE: "1"
       QT_X11_NO_MITSHM: "1"
     stdin_open: true

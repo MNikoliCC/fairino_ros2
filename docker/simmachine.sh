@@ -133,14 +133,18 @@ detect_host_display() {
 }
 
 write_env_file() {
-  local temporary="${ENV_FILE}.tmp" x_display
+  local temporary="${ENV_FILE}.tmp" x_display host_uid host_gid
   x_display="$(detect_host_display)"
+  host_uid="${SUDO_UID:-$(id -u)}"
+  host_gid="${SUDO_GID:-$(id -g)}"
 
   {
     printf 'SIMMACHINE_VERSION=%s\n' "${SIMMACHINE_VERSION}"
     printf 'SIMMACHINE_IMAGE=fairino-simmachine:%s\n' "${SIMMACHINE_VERSION}"
     printf 'SIMMACHINE_IP=192.168.58.2\n'
-    printf 'HOST_DISPLAY=%s\n' "${x_display}"
+    printf 'DISPLAY=%s\n' "${x_display}"
+    printf 'HOST_UID=%s\n' "${host_uid}"
+    printf 'HOST_GID=%s\n' "${host_gid}"
   } >"${temporary}"
   mv -- "${temporary}" "${ENV_FILE}"
 }

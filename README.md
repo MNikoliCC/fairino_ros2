@@ -9,6 +9,7 @@ This workspace runs two containers through one Compose project:
 
 The host directory `src/fairino_ros2` is mounted read-only at
 `/ros2_ws/src/fairino_ros2`. The ROS container builds all retained packages with
+The container runs as the non-root `ros` user with the host user's numeric UID and GID.
 `colcon build --symlink-install` whenever it starts. Build, install, and log
 outputs are kept in named Docker volumes.
 
@@ -19,7 +20,6 @@ uses the ROS 2 image's default middleware.
 
 ```bash
 cd ~/docker
-xhost +si:localuser:root
 ./simmachine.sh up
 ```
 
@@ -55,10 +55,10 @@ Open a sourced ROS 2 shell and choose the hardware backend explicitly:
 cd ~/colcon_ws/src/fairino_ros2/docker
 docker compose exec ros2 bash
 
-# Safe mock hardware; this is also the default
+# Safe mock hardware
 ros2 launch fairino20_v6_moveit2_config demo.launch.py use_mock_hardware:=true
 
-# FAIRINO SDK hardware connected to 192.168.58.2
+# FAIRINO SDK hardware connected to 192.168.58.2; this is also the default
 ros2 launch fairino20_v6_moveit2_config demo.launch.py use_mock_hardware:=false
 ```
 
