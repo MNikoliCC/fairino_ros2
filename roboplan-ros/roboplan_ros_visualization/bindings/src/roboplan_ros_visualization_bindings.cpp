@@ -1,0 +1,159 @@
+#include <nanobind/eigen/dense.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+
+#include <roboplan_ros_cpp/type_conversions.hpp>
+#include <roboplan_ros_cpp_bindings/roboplan_ros_cpp_bindings.hpp>
+
+#include <roboplan_ros_visualization/path_visualization.hpp>
+#include <roboplan_ros_visualization/roboplan_ik_marker.hpp>
+#include <roboplan_ros_visualization/roboplan_visualizer.hpp>
+
+namespace nb = nanobind;
+using namespace nb::literals;
+
+/// @brief Python nanobind bindings for the roboplan_ros_visualization package.
+/// @details Pulls in the roboplan and roboplan_ros_cpp bindings as necessary,
+/// and installs the packages here into a "bindings" subpackage of the existing
+/// python package.
+NB_MODULE(_visualization_ext, m) {
+
+  // Ensure dependent nanobind modules are loaded first so their types are registered.
+  // Otherwise we end up with bad casts when importing everything at once without pre-importing
+  // the deps.
+  nb::module_::import_("roboplan.core");
+  nb::module_::import_("roboplan.simple_ik");
+  nb::module_::import_("roboplan_ros.cpp");
+
+  // Pre-import Python messages to avoid repeated lookups
+  nb::object MarkerArray = nb::module_::import_("visualization_msgs.msg").attr("MarkerArray");
+  nb::object Marker = nb::module_::import_("visualization_msgs.msg").attr("Marker");
+  nb::object ColorRGBA = nb::module_::import_("std_msgs.msg").attr("ColorRGBA");
+  nb::object InteractiveMarker =
+      nb::module_::import_("visualization_msgs.msg").attr("InteractiveMarker");
+  nb::object InteractiveMarkerFeedback =
+      nb::module_::import_("visualization_msgs.msg").attr("InteractiveMarkerFeedback");
+
+  /// IMPORTANT: We use a shared_ptr to manage ownership of the python Scene object between
+  /// the python and C++ processes. This is critical! Otherwise problems with deconstruction
+  /// and unexpected copying can cause all kinds of headaches.
+  /// For more information: https://nanobind.readthedocs.io/en/latest/ownership.html
+  nb::class_<roboplan_ros_visualization::RoboplanVisualizer>(
+      m, "RoboplanVisualizer",
+      "Tool to build RViz MarkerArray messages from a RoboPlan scene and joint configuration.")
+      // Useful docs on custom constructors and why this is setup this way
+      // https://nanobind.readthedocs.io/en/latest/porting.html#custom-constructors
+      .def(
+          "__init__",
+          [](roboplan_ros_visualization::RoboplanVisualizer* self,
+             std::shared_ptr<const roboplan::Scene> scene, const std::string& urdf_xml,
+             const std::string& frame_id, const std::string& ns, const std::string& group_name,
+             nb::handle py_color) {
+            std::optional<std_msgs::msg::ColorRGBA> color = std::nullopt;
+            if (!py_color.is_none()) {
+              color = pyToCppMsg<std_msgs::msg::ColorRGBA>(py_color);
+            }
+            // nanobind will pre-allocate memory for the object, so we just construct the object
+            // directly there in this lambda. This is messy but ensures no duplication and correct
+            // ownership.
+            new (self) roboplan_ros_visualization::RoboplanVisualizer(
+                std::move(scene), urdf_xml, frame_id, ns, group_name, color);
+          },
+          "scene"_a, "urdf_xml"_a, "frame_id"_a = "world", "ns"_a = "/roboplan",
+          "group_name"_a = "", "color"_a = nb::none())
+      .def(
+          "markers_from_configuration",
+          [MarkerArray](roboplan_ros_visualization::RoboplanVisualizer& self,
+                        const Eigen::VectorXd& q) {
+            return cppToPyMsg(self.markers_from_configuration(q), MarkerArray);
+          },
+          "q"_a,
+          "Compute marker array for the given joint configuration, restricted to the currently "
+          "selected joint group (see the constructor and set_group).")
+      .def("set_group", &roboplan_ros_visualization::RoboplanVisualizer::set_group, "group_name"_a,
+           "Select the joint group whose links are rendered. Pass an empty string for the whole "
+           "scene. Raises if the group name is not found in the scene.")
+      .def(
+          "clear_markers",
+          [MarkerArray](roboplan_ros_visualization::RoboplanVisualizer& self) {
+            return cppToPyMsg(self.clear_markers(), MarkerArray);
+          },
+          "Return a MarkerArray that deletes all previously published markers.")
+      .def(
+          "set_color",
+          [](roboplan_ros_visualization::RoboplanVisualizer& self, nb::handle py_color) {
+            self.set_color(pyToCppMsg<std_msgs::msg::ColorRGBA>(py_color));
+          },
+          "color"_a, "Set a color override for all geometry markers.")
+      .def("clear_color", &roboplan_ros_visualization::RoboplanVisualizer::clear_color,
+           "Remove the color override, reverting to per-geometry colors.");
+
+  nb::class_<roboplan_ros_visualization::RoboplanIKMarker>(
+      m, "RoboplanIKMarker",
+      "IK solver backend with interactive marker support for 6-DOF pose control.")
+      .def(
+          "__init__",
+          [](roboplan_ros_visualization::RoboplanIKMarker* self,
+             std::shared_ptr<const roboplan::Scene> scene, const std::string& base_link,
+             const std::string& tip_link, nb::callable ik_solve_fn) {
+            // Wrap the python callable in C++ to be able to pass function pointers between python
+            // and cpp.
+            auto cpp_solve_fn =
+                [ik_solve_fn](const Eigen::Matrix4d& target_pose,
+                              const Eigen::VectorXd& seed) -> std::optional<Eigen::VectorXd> {
+              nb::gil_scoped_acquire gil;
+              nb::object result = ik_solve_fn(target_pose, seed);
+              if (result.is_none()) {
+                return std::nullopt;
+              }
+              return nb::cast<Eigen::VectorXd>(result);
+            };
+            new (self) roboplan_ros_visualization::RoboplanIKMarker(
+                std::move(scene), base_link, tip_link, std::move(cpp_solve_fn));
+          },
+          "scene"_a, "base_link"_a, "tip_link"_a, "ik_solve_fn"_a)
+      .def(
+          "construct_imarker",
+          [InteractiveMarker](const roboplan_ros_visualization::RoboplanIKMarker& self) {
+            return cppToPyMsg(self.construct_imarker(), InteractiveMarker);
+          },
+          "Build an InteractiveMarker message for the current target pose.")
+      .def(
+          "process_feedback",
+          [InteractiveMarkerFeedback](roboplan_ros_visualization::RoboplanIKMarker& self,
+                                      nb::handle py_feedback) {
+            auto feedback =
+                pyToCppMsg<visualization_msgs::msg::InteractiveMarkerFeedback>(py_feedback);
+            auto result = self.process_feedback(feedback);
+            if (result.has_value()) {
+              return nb::cast(*result, nb::rv_policy::copy);
+            }
+            return nb::cast(nb::none());
+          },
+          "feedback"_a,
+          "Process InteractiveMarkerFeedback. Returns joint positions on success, or else None.")
+      .def("set_seed_configuration",
+           &roboplan_ros_visualization::RoboplanIKMarker::set_seed_configuration, "q"_a,
+           "Set the seed joint positions for the next solve.");
+
+  m.def(
+      "markerFromJointTrajectory",
+      [Marker](const roboplan::Scene& scene, const roboplan::JointTrajectory& trajectory,
+               const std::vector<std::string>& frame_names, const std::string& frame_id,
+               const std::string& ns, nb::handle py_color, double line_width) {
+        std::optional<std_msgs::msg::ColorRGBA> color = std::nullopt;
+        if (!py_color.is_none()) {
+          color = pyToCppMsg<std_msgs::msg::ColorRGBA>(py_color);
+        }
+        return cppToPyMsg(roboplan_ros_visualization::markerFromJointTrajectory(
+                              scene, trajectory, frame_names, frame_id, ns, color, line_width),
+                          Marker);
+      },
+      "scene"_a, "trajectory"_a, "frame_names"_a, "frame_id"_a = "world", "ns"_a = "/roboplan_path",
+      "color"_a = nb::none(), "line_width"_a = 0.01,
+      "Build a LINE_LIST Marker tracing the Cartesian path of the given frames along a joint "
+      "trajectory via forward kinematics.");
+}

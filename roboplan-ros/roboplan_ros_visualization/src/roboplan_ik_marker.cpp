@@ -1,0 +1,84 @@
+#include <roboplan_ros_cpp/type_conversions.hpp>
+#include <roboplan_ros_visualization/roboplan_ik_marker.hpp>
+
+namespace roboplan_ros_visualization {
+
+RoboplanIKMarker::RoboplanIKMarker(std::shared_ptr<const roboplan::Scene> scene,
+                                   const std::string& base_link, const std::string& tip_link,
+                                   IkSolveFunction ik_solve_fn)
+    : scene_(std::move(scene)), base_link_(base_link), tip_link_(tip_link),
+      ik_solve_fn_(std::move(ik_solve_fn)) {
+  seed_configuration_ = scene_->getCurrentJointPositions();
+  const auto se3_pose = scene_->forwardKinematics(seed_configuration_, tip_link_, base_link_);
+  target_pose_ = roboplan_ros_cpp::se3ToPose(se3_pose);
+}
+
+visualization_msgs::msg::InteractiveMarker RoboplanIKMarker::construct_imarker() const {
+  visualization_msgs::msg::InteractiveMarker int_marker;
+  int_marker.header.frame_id = base_link_;
+  int_marker.name = "ik_target";
+  int_marker.description = "IK Target Pose Marker";
+  int_marker.pose = target_pose_;
+  int_marker.scale = 0.2f;
+
+  visualization_msgs::msg::Marker sphere;
+  sphere.type = visualization_msgs::msg::Marker::SPHERE;
+  sphere.scale.x = 0.025;
+  sphere.scale.y = 0.025;
+  sphere.scale.z = 0.025;
+  sphere.color.r = 0.0f;
+  sphere.color.g = 0.5f;
+  sphere.color.b = 1.0f;
+  sphere.color.a = 1.0f;
+
+  visualization_msgs::msg::InteractiveMarkerControl sphere_control;
+  sphere_control.always_visible = true;
+  sphere_control.markers.push_back(sphere);
+  int_marker.controls.push_back(sphere_control);
+
+  struct AxisDef {
+    double x, y, z;
+    const char* move_name;
+    const char* rotate_name;
+  };
+
+  const AxisDef axes[] = {
+      {1.0, 0.0, 0.0, "move_x", "rotate_x"},
+      {0.0, 1.0, 0.0, "move_y", "rotate_y"},
+      {0.0, 0.0, 1.0, "move_z", "rotate_z"},
+  };
+
+  for (const auto& axis : axes) {
+    visualization_msgs::msg::InteractiveMarkerControl control;
+    control.orientation.w = 1.0;
+    control.orientation.x = axis.x;
+    control.orientation.y = axis.y;
+    control.orientation.z = axis.z;
+
+    control.name = axis.move_name;
+    control.interaction_mode = visualization_msgs::msg::InteractiveMarkerControl::MOVE_AXIS;
+    int_marker.controls.push_back(control);
+
+    control.name = axis.rotate_name;
+    control.interaction_mode = visualization_msgs::msg::InteractiveMarkerControl::ROTATE_AXIS;
+    int_marker.controls.push_back(control);
+  }
+
+  return int_marker;
+}
+
+std::optional<Eigen::VectorXd> RoboplanIKMarker::process_feedback(
+    const visualization_msgs::msg::InteractiveMarkerFeedback& feedback) {
+  if (feedback.event_type != visualization_msgs::msg::InteractiveMarkerFeedback::POSE_UPDATE) {
+    return std::nullopt;
+  }
+
+  target_pose_ = feedback.pose;
+  const Eigen::Matrix4d tform = roboplan_ros_cpp::poseToSE3(target_pose_);
+
+  return ik_solve_fn_(tform, seed_configuration_);
+}
+
+void RoboplanIKMarker::set_seed_configuration(const Eigen::VectorXd& q) { seed_configuration_ = q; }
+
+}  // namespace roboplan_ros_visualization

@@ -1,0 +1,30 @@
+from setuptools import setup
+
+package_name = "roboplan_ros_py"
+
+setup(
+    name=package_name,
+    version="0.6.1",
+    packages=[package_name],
+    data_files=[
+        ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
+        ("share/" + package_name, ["package.xml"]),
+    ],
+    install_requires=[
+        "setuptools",
+        "roboplan_ros_cpp",
+    ],
+    zip_safe=True,
+    maintainer="Sebastian Castro, Erik Holum",
+    maintainer_email="sebas.a.castro@gmail.com, eholum@gmail.com",
+    description="Python bindings for the RoboPlan motion planning library.",
+    license="MIT",
+    extras_require={
+        "test": [
+            "pytest",
+        ],
+    },
+    entry_points={
+        "console_scripts": [],
+    },
+)

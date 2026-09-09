@@ -1,35 +1,74 @@
-FROM ros:humble-ros-base-jammy
+ARG ROS_DISTRO=humble
+FROM ros:${ROS_DISTRO}-ros-base
 
+ARG ROS_DISTRO
 ARG ROS_UID=1000
 ARG ROS_GID=1000
+ARG ROBOPLAN_VERSION=ac29aa9
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    CMAKE_POLICY_VERSION_MINIMUM=3.5
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
+      git \
       iputils-ping \
       python3-colcon-common-extensions \
-      ros-humble-controller-manager \
-      ros-humble-hardware-interface \
-      ros-humble-joint-state-broadcaster \
-      ros-humble-joint-state-publisher-gui \
-      ros-humble-joint-trajectory-controller \
-      ros-humble-moveit-configs-utils \
-      ros-humble-moveit-kinematics \
-      ros-humble-moveit-planners \
-      ros-humble-moveit-ros-move-group \
-      ros-humble-moveit-ros-visualization \
-      ros-humble-moveit-setup-assistant \
-      ros-humble-moveit-simple-controller-manager \
-      ros-humble-pluginlib \
-      ros-humble-robot-state-publisher \
-      ros-humble-ros2-control-test-assets \
-      ros-humble-rosidl-default-generators \
-      ros-humble-rviz2 \
-      ros-humble-tf2-ros \
-      ros-humble-urdf \
-      ros-humble-xacro \
+      python3-pip \
+      ros-${ROS_DISTRO}-ament-cmake-python \
+      ros-${ROS_DISTRO}-controller-manager \
+      ros-${ROS_DISTRO}-hardware-interface \
+      ros-${ROS_DISTRO}-interactive-markers \
+      ros-${ROS_DISTRO}-joint-state-broadcaster \
+      ros-${ROS_DISTRO}-joint-state-publisher-gui \
+      ros-${ROS_DISTRO}-joint-trajectory-controller \
+      ros-${ROS_DISTRO}-moveit-configs-utils \
+      ros-${ROS_DISTRO}-moveit-kinematics \
+      ros-${ROS_DISTRO}-moveit-planners \
+      ros-${ROS_DISTRO}-moveit-ros-move-group \
+      ros-${ROS_DISTRO}-moveit-ros-visualization \
+      ros-${ROS_DISTRO}-moveit-setup-assistant \
+      ros-${ROS_DISTRO}-moveit-simple-controller-manager \
+      ros-${ROS_DISTRO}-pluginlib \
+      ros-${ROS_DISTRO}-robot-state-publisher \
+      ros-${ROS_DISTRO}-ros2-control-test-assets \
+      ros-${ROS_DISTRO}-rosidl-default-generators \
+      ros-${ROS_DISTRO}-rviz2 \
+      ros-${ROS_DISTRO}-tf2-eigen \
+      ros-${ROS_DISTRO}-tf2-ros \
+      ros-${ROS_DISTRO}-urdf \
+      ros-${ROS_DISTRO}-xacro \
     && rm -rf /var/lib/apt/lists/*
+
+# RoboPlan Core is an immutable underlay in the image. Only the two packages
+# required by the ROS wrappers are built; planners and example models are not.
+RUN mkdir -p /opt/roboplan_ws/src \
+    && git clone https://github.com/open-planning/roboplan.git /opt/roboplan_ws/src/roboplan \
+    && git -C /opt/roboplan_ws/src/roboplan checkout "${ROBOPLAN_VERSION}" \
+    && for ignored_package in roboplan_cartesian_planning roboplan_example_models roboplan_examples roboplan_oink roboplan_rrt roboplan_toppra; do \
+         touch "/opt/roboplan_ws/src/roboplan/${ignored_package}/COLCON_IGNORE"; \
+       done \
+    && source "/opt/ros/${ROS_DISTRO}/setup.bash" \
+    && apt-get update \
+    && rosdep install \
+         --from-paths \
+           /opt/roboplan_ws/src/roboplan/roboplan \
+           /opt/roboplan_ws/src/roboplan/roboplan_simple_ik \
+         --ignore-src \
+         --rosdistro "${ROS_DISTRO}" \
+         -t build \
+         --as-root pip:false \
+         -y \
+    && cd /opt/roboplan_ws \
+    && colcon build \
+         --packages-select roboplan roboplan_simple_ik \
+         --cmake-args \
+           -DBUILD_TESTING=OFF \
+           -DGENERATE_PYTHON_STUBS=OFF \
+    && rm -rf /opt/roboplan_ws/build /opt/roboplan_ws/log /var/lib/apt/lists/*
 
 RUN groupadd --gid "${ROS_GID}" ros \
     && useradd --uid "${ROS_UID}" --gid "${ROS_GID}" --create-home --shell /bin/bash ros \
@@ -40,7 +79,8 @@ COPY ros2_entrypoint.sh /ros2_entrypoint.sh
 
 RUN chmod +x /ros2_entrypoint.sh \
     && printf '%s\n' \
-      'source /opt/ros/humble/setup.bash' \
+      'source /opt/ros/${ROS_DISTRO}/setup.bash' \
+      '[ ! -f /opt/roboplan_ws/install/setup.bash ] || source /opt/roboplan_ws/install/setup.bash' \
       '[ ! -f /ros2_ws/install/setup.bash ] || source /ros2_ws/install/setup.bash' \
       >> /etc/bash.bashrc
 

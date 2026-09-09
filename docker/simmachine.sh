@@ -7,6 +7,9 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 OFFICIAL_DOWNLOAD_PAGE="${FAIRINO_DOWNLOAD_PAGE:-https://manual.fairino.support/latest/download.html}"
 DRIVE_URL_OVERRIDE="${FAIRINO_DRIVE_URL:-}"
 FALLBACK_DRIVE_URL="https://drive.google.com/file/d/143PtR2eQj9tIgff_sCAVMdZrRZvnZ_ro/view"
+ROS_IMAGE_DISTRO="${FAIRINO_ROS_DISTRO:-humble}"
+ROBOPLAN_VERSION_FILE="${SCRIPT_DIR}/../roboplan-ros/ROBOPLAN_VERSION"
+ROBOPLAN_CORE_VERSION="${ROBOPLAN_VERSION:-$(<"${ROBOPLAN_VERSION_FILE}")}"
 
 say() {
   printf '[FAIRINO] %s\n' "$*"
@@ -145,13 +148,14 @@ write_env_file() {
     printf 'DISPLAY=%s\n' "${x_display}"
     printf 'HOST_UID=%s\n' "${host_uid}"
     printf 'HOST_GID=%s\n' "${host_gid}"
+    printf 'FAIRINO_ROS_DISTRO=%s\n' "${ROS_IMAGE_DISTRO}"
+    printf 'ROBOPLAN_VERSION=%s\n' "${ROBOPLAN_CORE_VERSION}"
   } >"${temporary}"
   mv -- "${temporary}" "${ENV_FILE}"
 }
 
 delete_all() {
-  local container_ids
-  local -a image_refs=()
+  local -a container_ids=() image_refs=() volume_names=()
 
   say "Removing the FAIRINO SimMachine and ROS 2 stack..."
   if [[ -f "${ENV_FILE}" ]]; then
@@ -159,14 +163,12 @@ delete_all() {
   fi
 
   say "Removing all FAIRINO stack containers..."
-  container_ids="$(docker ps --all --quiet --filter 'name=^/fairino-simmachine-v')"
-  if [[ -n "${container_ids}" ]]; then
-    # The IDs come directly from Docker's exact SimMachine name filter.
-    docker container rm --force ${container_ids}
-  fi
-
-  if docker container inspect fairino-ros2-humble >/dev/null 2>&1; then
-    docker container rm --force fairino-ros2-humble
+  mapfile -t container_ids < <(
+    docker ps --all --quiet --filter 'name=^/fairino-simmachine-v'
+    docker ps --all --quiet --filter 'name=^/fairino-ros2-'
+  )
+  if ((${#container_ids[@]} > 0)); then
+    docker container rm --force "${container_ids[@]}"
   fi
 
   if docker network inspect fairino-net >/dev/null 2>&1; then
@@ -176,24 +178,23 @@ delete_all() {
 
   mapfile -t image_refs < <(
     docker image ls --format '{{.Repository}}:{{.Tag}}' |
-      sed -n '/^fairino-simmachine:/p; /^fairino_simmachine:/p; /^fairno_simmachine:/p' |
+      sed -n '/^fairino-simmachine:/p; /^fairino_simmachine:/p; /^fairno_simmachine:/p; /^fairino-ros2:/p; /^fairino-ros2-[^:]*:/p' |
       sort -u
   )
   if ((${#image_refs[@]} > 0)); then
-    say "Removing FAIRINO SimMachine images..."
+    say "Removing FAIRINO SimMachine and ROS 2 images..."
     docker image rm --force "${image_refs[@]}"
   fi
 
-  if docker image inspect fairino-ros2-humble:local >/dev/null 2>&1; then
-    say "Removing the ROS 2 Humble image..."
-    docker image rm --force fairino-ros2-humble:local
+  mapfile -t volume_names < <(
+    docker volume ls --format '{{.Name}}' |
+      sed -n '/^fairino-ros2-\(build\|install\|log\)$/p; /^fairino-ros2-.*-\(build\|install\|log\)$/p' |
+      sort -u
+  )
+  if ((${#volume_names[@]} > 0)); then
+    say "Removing ROS 2 workspace volumes..."
+    docker volume rm "${volume_names[@]}"
   fi
-
-  for volume in fairino-ros2-build fairino-ros2-install fairino-ros2-log; do
-    if docker volume inspect "${volume}" >/dev/null 2>&1; then
-      docker volume rm "${volume}"
-    fi
-  done
 
   if [[ -d "${SIM_DIR}" ]]; then
     say "Removing cached SimMachine archives..."
@@ -211,6 +212,11 @@ prepare() {
   require_command docker
   docker compose version >/dev/null 2>&1 || die "The Docker Compose plugin is unavailable."
   docker info >/dev/null 2>&1 || die "The Docker daemon is unavailable or this user lacks permission."
+
+  case "${ROS_IMAGE_DISTRO}" in
+    humble|jazzy) ;;
+    *) die "FAIRINO_ROS_DISTRO must be 'humble' or 'jazzy', not '${ROS_IMAGE_DISTRO}'." ;;
+  esac
 
   mkdir -p -- "${SIM_DIR}"
   drive_url="$(resolve_drive_url)"
@@ -249,12 +255,15 @@ usage() {
   cat <<'EOF'
 Usage: ./simmachine.sh [up|update|down|logs|status|delete]
 
-  up      check the latest version, prepare the image, and start the container
+  up      check the latest version, prepare the images, and start the stack
   update  same as up; explicit command for future upgrades
-  down    stop and remove the container (the cached TAR and images remain)
-  logs    follow the container logs
+  down    stop and remove the containers (cached TAR and images remain)
+  logs    follow the SimMachine container logs
   status  show the Compose status
   delete  remove the complete stack, images, volumes, network, and cached files
+
+Set FAIRINO_ROS_DISTRO=humble (default) or FAIRINO_ROS_DISTRO=jazzy before up/update to select
+the ROS 2 image. Jazzy support is provided as a build option but is untested.
 EOF
 }
 
@@ -267,6 +276,7 @@ main() {
       prepare
       compose up --detach
       say "fairino-simmachine-v${SIMMACHINE_VERSION} is running."
+      say "fairino-ros2-${ROS_IMAGE_DISTRO} is running."
       say "Web interface: http://192.168.58.2 (admin / 123)"
       ;;
     down)

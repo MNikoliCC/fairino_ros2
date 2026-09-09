@@ -12,16 +12,20 @@ services:
         ipv4_address: ${SIMMACHINE_IP:-192.168.58.2}
 
   ros2:
+    image: fairino-ros2:${FAIRINO_ROS_DISTRO:-humble}
     build:
       context: .
       dockerfile: Dockerfile.ros2
       args:
+        ROS_DISTRO: ${FAIRINO_ROS_DISTRO:-humble}
         ROS_UID: ${HOST_UID:-1000}
         ROS_GID: ${HOST_GID:-1000}
-    image: fairino-ros2-humble:local
-    container_name: fairino-ros2-humble
+        ROBOPLAN_VERSION: ${ROBOPLAN_VERSION:-ac29aa9}
+    container_name: fairino-ros2-${FAIRINO_ROS_DISTRO:-humble}
     depends_on:
       - simmachine
+    init: true
+    ipc: host
     environment:
       DISPLAY: ${DISPLAY}
       LIBGL_ALWAYS_SOFTWARE: "1"
@@ -29,7 +33,12 @@ services:
     stdin_open: true
     tty: true
     volumes:
-      - ..:/ros2_ws/src/fairino_ros2:ro
+      - ../fairino20_v6_moveit2_config:/ros2_ws/src/fairino20_v6_moveit2_config:ro
+      - ../fairino_description:/ros2_ws/src/fairino_description:ro
+      - ../fairino_hardware:/ros2_ws/src/fairino_hardware:ro
+      - ../fairino_hardware_v3_9_9:/ros2_ws/src/fairino_hardware_v3_9_9:ro
+      - ../fairino_msgs:/ros2_ws/src/fairino_msgs:ro
+      - ../roboplan-ros:/ros2_ws/src/roboplan_ros:ro
       - ros2-build:/ros2_ws/build
       - ros2-install:/ros2_ws/install
       - ros2-log:/ros2_ws/log
@@ -49,8 +58,8 @@ networks:
 
 volumes:
   ros2-build:
-    name: fairino-ros2-build
+    name: fairino-ros2-${FAIRINO_ROS_DISTRO:-humble}-build
   ros2-install:
-    name: fairino-ros2-install
+    name: fairino-ros2-${FAIRINO_ROS_DISTRO:-humble}-install
   ros2-log:
-    name: fairino-ros2-log
+    name: fairino-ros2-${FAIRINO_ROS_DISTRO:-humble}-log

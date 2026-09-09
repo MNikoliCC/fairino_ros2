@@ -1,0 +1,14 @@
+.git/
+.github
+.gitignore
+.pixi/
+
+# A local RoboPlan clone; the Dockerfile clones its own copy.
+roboplan/
+
+**/log*
+**/build*
+**/install*
+**/Dockerfile
+
+docker-compose.yaml
