@@ -1,0 +1,44 @@
+name: FAIRINO runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'diagnostics: host only; mock: build + ROS; simmachine: also probe simulator'
+        type: choice
+        options: [diagnostics, mock, simmachine]
+        default: diagnostics
+  push:
+    branches: [main, 'ci/**', 'codex/**']
+
+# No pull_request or pull_request_target trigger: this is a public repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: fairino-self-hosted
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.repository == 'MNikoliCC/fairino_ros2' && vars.FAIRINO_RUNNER_ENABLED == 'true'
+    runs-on: [self-hosted, Linux, X64, fairino-sim]
+    timeout-minutes: 90
+    env:
+      CI_MODE: ${{ inputs.mode || 'mock' }}
+      SIMMACHINE_IMAGE: ${{ vars.FAIRINO_CI_SIMMACHINE_IMAGE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Inspect, build and collect data
+        shell: bash
+        run: bash ci/run.sh
+      - name: Upload diagnostics and simulation data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fairino-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fairino-${{ github.run_id }}-${{ github.run_attempt }}/artifacts
+          if-no-files-found: warn
+          retention-days: 7
