@@ -1,0 +1,31 @@
+# Independent from docker/compose.yaml: no shared container names, volumes,
+# host IPC, X11 mounts, published ports, or fixed controller IPs.
+services:
+  ros2:
+    image: fairino-ci-ros2:humble
+    build:
+      context: ../docker
+      dockerfile: Dockerfile.ros2
+      args:
+        ROS_DISTRO: humble
+        ROS_UID: ${CI_UID:?}
+        ROS_GID: ${CI_GID:?}
+        ROBOPLAN_VERSION: ${CI_ROBOPLAN_VERSION:?}
+    init: true
+    environment:
+      ROS_DOMAIN_ID: '87'
+      ROS_LOG_DIR: /artifacts/ros
+      CI_MODE: ${CI_MODE:-mock}
+    volumes:
+      - ..:/ros2_ws/src/fairino_repo:ro
+      - ${CI_ARTIFACTS:?}:/artifacts
+    command: [bash, /ros2_ws/src/fairino_repo/ci/smoke.sh]
+
+  simmachine:
+    profiles: [simmachine]
+    image: ${SIMMACHINE_IMAGE:-fairino-simmachine:not-configured}
+    pull_policy: never
+    # Matches the vendor simulator's existing Compose requirement.
+    # Only use on a dedicated simulation host/VM.
+    privileged: true
+    user: root
