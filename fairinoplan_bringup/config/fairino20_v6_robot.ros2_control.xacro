@@ -3,7 +3,7 @@
 
   <xacro:macro
     name="fairino20_v6_robot_ros2_control"
-    params="name initial_positions_file use_mock_hardware">
+    params="name initial_positions_file use_mock_hardware controller_ip:=192.168.58.2 allow_safety_config_writes:=false">
 
     <xacro:property
       name="initial_positions"
@@ -17,6 +17,31 @@
 
         <xacro:unless value="${use_mock_hardware}">
           <plugin>fairino_hardware/FairinoHardwareInterface</plugin>
+          <param name="controller_ip">${controller_ip}</param>
+          <!-- ServoJ over UDP (robot port 20007), cmdT = ros2_control period. -->
+          <param name="servoj_cmd_period">0.001</param>
+          <!-- CNDE realtime state period (4 ms = 250 Hz is the SDK minimum). -->
+          <param name="realtime_state_period_ms">4</param>
+          <param name="status_rate">50.0</param>
+          <param name="feedback_timeout">0.1</param>
+          <param name="feedback_error_timeout">0.5</param>
+          <!-- v_max per joint (FR20). Used by the discontinuity guard
+               (|command step| <= jump_guard_factor * v_max * period, not a
+               speed limiter) and by the per-point step limit. -->
+          <param name="max_joint_velocity_deg_s">120,120,120,180,180,180</param>
+          <param name="jump_guard_factor">2.0</param>
+          <!-- Delayed topic commands: the allowed step grows with the time since
+               the last command change, up to this gap [s]. -->
+          <param name="jump_guard_max_gap">0.05</param>
+          <param name="sync_tolerance">0.002</param>
+          <param name="standstill_velocity_deg_s">0.5</param>
+          <!-- ServoJ FIFO flow control: skip a cycle when sent - executed points
+               (servoJCmdNum) exceeds this; 0 disables it. See RobotStatus.msg. -->
+          <param name="servoj_max_queue">8</param>
+          <!-- Max step of one ServoJ point = factor x v_max x cmdT. -->
+          <param name="point_velocity_factor">1.0</param>
+          <!-- SAFETY-RELATED: SetVelReducePara is refused unless explicitly allowed. -->
+          <param name="allow_safety_config_writes">${allow_safety_config_writes}</param>
         </xacro:unless>
       </hardware>
 

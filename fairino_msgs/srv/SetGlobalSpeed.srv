@@ -1,0 +1,17 @@
+# FAIRINO global speed percentage (SetSpeed / SetSpeedInstant, 0-100 %).
+# This scales FAIRINO motion commands; it is NOT a safety-speed threshold and
+# NOT the RoboPlan/OInK joint limit.
+
+int32 percent            # 1..100
+bool instant             # true: SetSpeedInstant, false: SetSpeed
+bool operator_confirmed  # must be true; the UI asks for explicit confirmation
+string requested_by
+string reason
+---
+bool success
+int32 sdk_return_code
+float64 old_speed_scale_manual
+float64 old_speed_scale_auto
+float64 new_speed_scale_manual   # read back from the realtime state after the call
+float64 new_speed_scale_auto
+string message

@@ -150,6 +150,7 @@ write_env_file() {
     printf 'HOST_GID=%s\n' "${host_gid}"
     printf 'FAIRINO_ROS_DISTRO=%s\n' "${ROS_IMAGE_DISTRO}"
     printf 'ROBOPLAN_VERSION=%s\n' "${ROBOPLAN_CORE_VERSION}"
+    printf 'FAIRINO_ROS_DOMAIN_ID=%s\n' "${FAIRINO_ROS_DOMAIN_ID:-42}"
   } >"${temporary}"
   mv -- "${temporary}" "${ENV_FILE}"
 }

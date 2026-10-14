@@ -45,7 +45,9 @@ The ROS image uses these Compose build arguments:
 - `ROBOPLAN_VERSION`, defaulting to the pinned RoboPlan Core commit `ac29aa9`.
 - `ROS_UID` and `ROS_GID`, populated from the host user by `simmachine.sh`.
 
-RoboPlan Core and `roboplan_simple_ik` are built into the image. The host
+RoboPlan Core, `roboplan_simple_ik`, `roboplan_rrt`, `roboplan_toppra` and
+`roboplan_oink` are built into the image in **Release** mode (OInK is about ten
+times slower at -O0). The host
 `roboplan-ros` directory is mounted at `/ros2_ws/src/roboplan_ros`, and its C++,
 Python, and visualization wrappers are built at container startup. The generic
 and Franka examples are skipped, so MuJoCo and Franka-specific dependencies are
@@ -86,8 +88,10 @@ When `use_mock_hardware` is `true`, ros2_control loads
 the controller.
 
 The optional `ros2_cmd_server` exposes `/fairino_remote_command_service` for
-direct string-based FAIRINO SDK commands, so the user can choose it independently
-of the MoveIt hardware path.
+direct string-based FAIRINO SDK commands. Do **not** run it while the
+`FairinoHardwareInterface` is active: it opens a second SDK connection, which
+blocked on SimMachine. The hardware plugin itself provides status, recovery and
+speed services under `/fairino_robot/*`.
 
 ## Update and Manage the Stack
 

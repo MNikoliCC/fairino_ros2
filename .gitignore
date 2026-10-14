@@ -1,0 +1,6 @@
+# Editor state
+.vscode/
+
+# Python bytecode
+__pycache__/
+*.pyc

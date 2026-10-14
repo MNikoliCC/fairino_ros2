@@ -14,25 +14,31 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>control_msgs</exec_depend>
   <exec_depend>controller_manager</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
   <exec_depend>joint_trajectory_controller</exec_depend>
+  <exec_depend>position_controllers</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
   <exec_depend>xacro</exec_depend>
 
   <exec_depend>fairino_description</exec_depend>
   <exec_depend>fairino_hardware_v3_9_9</exec_depend>
 
   <exec_depend>roboplan_core</exec_depend>
+  <exec_depend>fairino_cartesian_servo</exec_depend>
   <exec_depend>roboplan_simple_ik</exec_depend>
   <exec_depend>roboplan_rrt</exec_depend>
   <exec_depend>roboplan_toppra</exec_depend>
   <exec_depend>roboplan_ros_cpp</exec_depend>
+  <exec_depend>fairino_msgs</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

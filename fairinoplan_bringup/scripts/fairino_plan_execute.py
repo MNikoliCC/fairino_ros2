@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import time
 
 import numpy as np
@@ -12,7 +13,9 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from trajectory_msgs.msg import JointTrajectory
 
 from roboplan.core import (
     CartesianConfiguration,
@@ -354,8 +357,8 @@ class FairinoPlanExecute(Node):
             self._joint_group,
         )
 
-        # FAIRINO hardware uses ServoJ cmdT = 0.008 s
-        self._traj_dt = 0.008
+        # Match the 1 kHz ros2_control / FAIRINO ServoJ command period.
+        self._traj_dt = 0.001
 
         # -------------------------------------------------------------
         # Goal inputs
@@ -393,6 +396,20 @@ class FairinoPlanExecute(Node):
 
         self._planned_traj = None
 
+        # Latched plan/execution status (JSON) and the planned trajectory, so
+        # a UI (Viser) can show the result of Plan and Execute.
+        latched = QoSProfile(
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._status_pub = self.create_publisher(String, "~/status", latched)
+        self._path_pub = self.create_publisher(
+            JointTrajectory, "~/planned_path", latched
+        )
+        self._publish_status("ready", "waiting for a goal")
+
         self.get_logger().info(
             "Ready."
         )
@@ -404,6 +421,11 @@ class FairinoPlanExecute(Node):
         self.get_logger().info(
             "Call ~/execute to execute."
         )
+
+    def _publish_status(self, state, message, **extra):
+        payload = {"state": state, "message": message, "stamp": time.time()}
+        payload.update(extra)
+        self._status_pub.publish(String(data=json.dumps(payload)))
 
     # =================================================================
     # Hardware state
@@ -468,6 +490,7 @@ class FairinoPlanExecute(Node):
             self.get_logger().error(
                 f"Joint goal failed: {e}"
             )
+            self._publish_status("failed", f"joint goal failed: {e}")
 
     # =================================================================
     # Cartesian planning
@@ -538,6 +561,7 @@ class FairinoPlanExecute(Node):
             self.get_logger().error(
                 f"Pose goal failed: {e}"
             )
+            self._publish_status("failed", f"pose goal failed: {e}")
 
     # =================================================================
     # Planning pipeline
@@ -594,6 +618,8 @@ class FairinoPlanExecute(Node):
         self.get_logger().info(
             "Planning..."
         )
+        plan_started = time.monotonic()
+        self._publish_status("planning", "RRT + shortcutting + TOPP-RA")
 
         self.get_logger().info(
             f"Start: "
@@ -656,6 +682,19 @@ class FairinoPlanExecute(Node):
             f"Plan ready: "
             f"{len(self._planned_traj.positions)} points."
         )
+        trajectory_msg = toJointTrajectory(self._planned_traj)
+        self._path_pub.publish(trajectory_msg)
+        duration = 0.0
+        if trajectory_msg.points:
+            stamp = trajectory_msg.points[-1].time_from_start
+            duration = stamp.sec + stamp.nanosec * 1e-9
+        self._publish_status(
+            "planned",
+            "plan ready; press Execute in plan mode",
+            points=len(self._planned_traj.positions),
+            trajectory_duration_s=duration,
+            planning_time_s=time.monotonic() - plan_started,
+        )
 
         if self._auto_execute:
             self._execute_latest()
@@ -711,6 +750,7 @@ class FairinoPlanExecute(Node):
             "Sending trajectory to "
             "fairino20_controller..."
         )
+        self._publish_status("executing", "trajectory sent to fairino20_controller")
 
         future = (
             self._execute_client.send_goal_async(
@@ -736,6 +776,10 @@ class FairinoPlanExecute(Node):
 
             self.get_logger().error(
                 "Trajectory rejected."
+            )
+            self._publish_status(
+                "failed",
+                "trajectory rejected (is fairino20_controller active / plan mode?)",
             )
 
             return
@@ -773,6 +817,7 @@ class FairinoPlanExecute(Node):
             self.get_logger().info(
                 "Trajectory execution complete."
             )
+            self._publish_status("succeeded", "trajectory execution complete")
 
         else:
 
@@ -780,6 +825,10 @@ class FairinoPlanExecute(Node):
                 f"Execution failed. "
                 f"Error code: {result.error_code}, "
                 f"message: {result.error_string}"
+            )
+            self._publish_status(
+                "failed",
+                f"execution failed: {result.error_code} {result.error_string}",
             )
 
     # =================================================================

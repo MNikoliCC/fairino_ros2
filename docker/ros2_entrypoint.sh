@@ -14,6 +14,7 @@ if find /ros2_ws/src -name package.xml -print -quit | grep -q .; then
     --symlink-install \
     --packages-skip roboplan_ros_examples roboplan_ros_franka \
     --cmake-args \
+      -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_TESTING=OFF \
       -DGENERATE_PYTHON_STUBS=OFF
 fi

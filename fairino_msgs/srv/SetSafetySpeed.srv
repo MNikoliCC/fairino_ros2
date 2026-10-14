@@ -1,0 +1,27 @@
+# SAFETY-RELATED: FAIRINO safety-speed configuration via
+# SetVelReducePara(enable, maxTCPVel, strategy, maxJointVel).
+# Refused unless the hardware parameter allow_safety_config_writes is true and
+# operator_confirmed is set. The SDK 3.9.9 has no getter for these values, so
+# the previous configuration cannot be read back; verify in the WebApp
+# (Initial Setup -> Safety -> Safety Speed).
+
+int32 ENABLE_DISABLED = 0
+int32 ENABLE_MANUAL_MODE = 1
+int32 ENABLE_ALL_MODES = 2
+int32 STRATEGY_STOP_ALARM = 0
+int32 STRATEGY_AUTO_LIMIT = 1        # only available with ENABLE_MANUAL_MODE
+int32 STRATEGY_STOP_ALARM_DISABLE = 2
+
+int32 enable
+float64 max_tcp_velocity_mm_s        # 0..1000 (SDK documentation)
+int32 strategy
+float64[6] max_joint_velocity_deg_s  # documented default 45 deg/s
+string safety_password               # optional; used for SafetyOPPasswordCheck, never logged
+bool operator_confirmed
+string requested_by
+string reason
+---
+bool success
+int32 password_check_return_code
+int32 sdk_return_code
+string message

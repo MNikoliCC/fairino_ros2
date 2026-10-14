@@ -5,6 +5,37 @@ Minimal ROS 2 bringup for FAIRINO FR20 using:
 - RoboPlan for IK, collision-aware RRT planning, and TOPP-RA time parameterization
 - ros2_control `joint_trajectory_controller` for trajectory execution
 - FAIRINO `FairinoHardwareInterface` for real robot communication / ServoJ
+- Viser + RoboPlan OInK for interactive Cartesian servoing
+
+## Interactive Viser servo
+
+```bash
+# FAIRINO SimMachine or robot at 192.168.58.2
+ros2 launch fairinoplan_bringup fairino20_viser_servo.launch.py use_mock_hardware:=false
+# mock hardware
+ros2 launch fairinoplan_bringup fairino20_viser_servo.launch.py use_mock_hardware:=true
+```
+
+Open <http://localhost:8000>, press **Enable Servo** and drag the TCP gizmo.
+Viser renders at 30 Hz, the gizmo publishes on change, and the C++ servo
+(`fairino_cartesian_servo`) runs the SE(3) filter, Cartesian rate limiter and
+RoboPlan OInK at 1 kHz into a `JointGroupPositionController`; `ros2_control`
+and ServoJ run at 1 kHz. Plan mode (RRT + TOPP-RA through
+`fairino20_controller`) is available from the same UI. The FAIRINO status,
+recovery and speed services are provided by the hardware plugin itself
+(`/fairino_robot/*`); do not start `ros2_cmd_server` alongside it.
+
+Documentation (repository `docs/`):
+[operator guide](../docs/viser_operator_guide.md),
+[architecture](../docs/viser_servo_architecture.md),
+[faults and recovery](../docs/fairino_fault_recovery.md),
+[speed configuration](../docs/fairino_speed_configuration.md),
+[benchmark](../docs/servo_benchmark.md),
+[SimMachine test plan](../docs/simmachine_test_plan.md).
+
+Test tools installed with this package:
+`fairino_servo_benchmark.py`, `fairino_fault_injection_test.py` (SimMachine
+only), `fairino_servo_state_machine_test.py` (mock only).
 
 ## Architecture
 
@@ -120,8 +151,14 @@ ros2 launch fairinoplan_bringup fairino20_roboplan.launch.py \
   use_mock_hardware:=false
 ```
 
-The FAIRINO hardware implementation currently hardcodes the controller IP
-in its own source. Verify that it matches the real controller before launch.
+The controller IP is the xacro/launch argument `controller_ip`
+(default `192.168.58.2`); the hardware parameters are listed in
+`config/fairino20_v6_robot.ros2_control.xacro`.
+
+The hardware loop and planned trajectory sampling run at 1 kHz. ServoJ uses
+the SDK UDP command transport on robot port 20007 with `cmdT=0.001 s`. For a
+real robot, use a real-time kernel, grant the controller manager real-time
+scheduling permissions, and connect the host directly to the robot network.
 
 ## RoboPlan packages required
 
@@ -138,6 +175,13 @@ Do not COLCON_IGNORE `roboplan_rrt` or `roboplan_toppra`.
 
 ## Important real-robot note
 
-`config/roboplan.yaml` contains conservative placeholder acceleration/jerk
-limits because FAIRINO's supplied MoveIt joint-limits file does not specify
-real acceleration limits. Validate these values before increasing them.
+`config/roboplan.yaml` overrides the URDF joint velocities with the FR20
+maxima (J1–J3 120 deg/s, J4–J6 180 deg/s) and contains conservative
+placeholder acceleration/jerk limits for TOPP-RA, because FAIRINO publishes no
+FR20 joint accelerations. Validate them before increasing them.
+
+The Viser servo uses its own limits (`fairino_cartesian_servo/config/fairino_cartesian_servo.yaml`):
+FR20 joint velocity maxima, 540 deg/s² joint acceleration (the peak FAIRINO's
+own planner used on SimMachine) and a 1 m/s Cartesian rate limit. See the
+[speed configuration](../docs/fairino_speed_configuration.md) before changing
+any speed.

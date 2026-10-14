@@ -26,12 +26,24 @@ services:
       - simmachine
     init: true
     ipc: host
+    # Real-time scheduling for the 1 kHz controller manager and servo loops.
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      memlock: -1
     environment:
       DISPLAY: ${DISPLAY}
+      # Dedicated DDS domain: with ipc: host, other ROS 2 systems on the same
+      # host are otherwise discovered through shared memory on domain 0 and
+      # can publish into this stack (for example a foreign /joint_states).
+      ROS_DOMAIN_ID: ${FAIRINO_ROS_DOMAIN_ID:-42}
       LIBGL_ALWAYS_SOFTWARE: "1"
       QT_X11_NO_MITSHM: "1"
     stdin_open: true
     tty: true
+    ports:
+      - "8000:8000"
     volumes:
       - ../fairino20_v6_moveit2_config:/ros2_ws/src/fairino20_v6_moveit2_config:ro
       - ../fairino_description:/ros2_ws/src/fairino_description:ro
@@ -40,6 +52,7 @@ services:
       - ../fairino_msgs:/ros2_ws/src/fairino_msgs:ro
       - ../roboplan-ros:/ros2_ws/src/roboplan_ros:ro
       - ../fairinoplan_bringup:/ros2_ws/src/fairinoplan_bringup:ro
+      - ../fairino_cartesian_servo:/ros2_ws/src/fairino_cartesian_servo:ro
       - ros2-build:/ros2_ws/build
       - ros2-install:/ros2_ws/install
       - ros2-log:/ros2_ws/log

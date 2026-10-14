@@ -17,6 +17,7 @@ find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(fairino_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 
 #set variable
@@ -76,6 +77,7 @@ ament_target_dependencies(fairino_hardware
   rclcpp
   fairino_msgs
   rclcpp_lifecycle 
+  std_srvs
 )
 
 
@@ -136,6 +138,6 @@ endif()
 
 #export
 ament_export_targets(fairino_hardware HAS_LIBRARY_TARGET)
-ament_export_dependencies(ament_cmake rclcpp hardware_interface pluginlib rclcpp_lifecycle)
+ament_export_dependencies(ament_cmake rclcpp hardware_interface pluginlib rclcpp_lifecycle fairino_msgs std_srvs)
 
 ament_package()

@@ -12,12 +12,28 @@ selected through the same build argument, but has intentionally not been tested
 yet.
 
 The ROS container runs as the non-root `ros` user with the host user's numeric
-UID and GID. The five FAIRINO packages and `roboplan-ros` are mounted read-only
+UID and GID. The FAIRINO packages (including `fairino_cartesian_servo` and
+`fairinoplan_bringup`) and `roboplan-ros` are mounted read-only
 under `/ros2_ws/src`; build, install, and log outputs are stored in named Docker
 volumes specific to the selected ROS distribution.
 
 No Cyclone DDS package or `RMW_IMPLEMENTATION` override is configured. The stack
-uses the ROS image's default middleware.
+uses the ROS image's default middleware on the dedicated domain
+`ROS_DOMAIN_ID=42` (`FAIRINO_ROS_DOMAIN_ID`), so ROS 2 systems in other
+containers on the same host cannot publish into it. The ROS container
+publishes port 8000 (Viser) and may use real-time scheduling (`SYS_NICE`,
+`rtprio 99`).
+
+## Viser Cartesian servo
+
+```bash
+docker compose exec ros2 bash
+ros2 launch fairinoplan_bringup fairino20_viser_servo.launch.py use_mock_hardware:=false
+```
+
+Then open <http://localhost:8000>. See [docs/README.md](docs/README.md) for the
+operator guide, architecture, fault recovery, speed configuration, benchmark
+and SimMachine test plan.
 
 ## Build and Start the Humble Stack
 
@@ -42,11 +58,14 @@ The FAIRINO WebApp is available at <http://192.168.58.2> using `admin` / `123`.
 ## RoboPlan Layout
 
 RoboPlan Core is cloned and built into `Dockerfile.ros2` at the commit stored in
-`roboplan-ros/ROBOPLAN_VERSION` (`ac29aa9` by default). Only the Core packages
-needed by the wrappers are included:
+`roboplan-ros/ROBOPLAN_VERSION` (`ac29aa9` by default), in Release mode. Only the
+Core packages needed by the wrappers, the planner and the servo are included:
 
 - `roboplan`
 - `roboplan_simple_ik`
+- `roboplan_rrt`
+- `roboplan_toppra`
+- `roboplan_oink`
 
 The mounted workspace builds these wrapper packages:
 
@@ -121,8 +140,10 @@ When `use_mock_hardware` is `true`, ros2_control loads
 the controller.
 
 The optional `ros2_cmd_server` exposes `/fairino_remote_command_service` for
-direct string-based FAIRINO SDK commands, so the user can choose it independently
-of the MoveIt hardware path.
+direct string-based FAIRINO SDK commands. Do **not** run it while the
+`FairinoHardwareInterface` is active: it opens a second SDK connection, which
+blocked on SimMachine. The hardware plugin itself provides status, recovery and
+speed services under `/fairino_robot/*`.
 
 ## Stop or Delete the Stack
 

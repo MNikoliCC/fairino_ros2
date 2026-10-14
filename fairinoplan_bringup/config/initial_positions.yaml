@@ -1,7 +1,11 @@
+# Initial joint positions [rad] for mock_components/GenericSystem only; the
+# FAIRINO hardware always starts from the measured position. The all-zero pose
+# is a wrist singularity of the FR20 (j5 = 0), so the mock starts in a
+# non-singular home pose close to the SimMachine default.
 initial_positions:
   j1: 0.0
-  j2: 0.0
-  j3: 0.0
-  j4: 0.0
-  j5: 0.0
+  j2: -1.5708
+  j3: 1.5708
+  j4: -1.5708
+  j5: -1.5708
   j6: 0.0

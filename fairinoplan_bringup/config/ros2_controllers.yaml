@@ -1,11 +1,14 @@
 controller_manager:
   ros__parameters:
-    # FAIRINO hardware implementation sends ServoJ with cmdT=0.008 s.
-    # 125 Hz keeps ros2_control's update period aligned with that command period.
-    update_rate: 125
+    # FAIRINO recommends ServoJ cmdT in the 1.0-1.6 ms range. Keep the
+    # ros2_control loop aligned with the 1 ms command period used by hardware.
+    update_rate: 1000
 
     fairino20_controller:
       type: joint_trajectory_controller/JointTrajectoryController
+
+    fairino_servo_controller:
+      type: position_controllers/JointGroupPositionController
 
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
@@ -28,3 +31,25 @@ fairino20_controller:
 
     allow_partial_joints_goal: false
     open_loop_control: false
+    # Hold the MEASURED position on (re)activation. With the Humble default
+    # (true) the controller holds the last command-interface value, which after
+    # a FAIRINO fault is the stale command at the fault (seen on SimMachine:
+    # 0.032 rad on j1); the hardware then refuses to arm ServoJ streaming.
+    set_last_command_interface_value_as_state_on_activation: false
+
+fairino_servo_controller:
+  ros__parameters:
+    joints:
+      - j1
+      - j2
+      - j3
+      - j4
+      - j5
+      - j6
+
+joint_state_broadcaster:
+  ros__parameters:
+    # FAIRINO joint feedback arrives every 4 ms (CNDE minimum), so 250 Hz
+    # /joint_states carries all information; 1 kHz only repeated samples and
+    # cost the Python subscribers (Viser UI, planner) most of a CPU core.
+    update_rate: 250

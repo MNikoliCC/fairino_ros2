@@ -1,6 +1,9 @@
 # RoboPlan dynamics configuration.
 #
-# Velocity limits are already read from the URDF.
+# max_velocity overrides the FAIRINO URDF (3.15-3.2 rad/s on every joint) with
+# the FR20 joint speed maxima published by FAIRINO: J1-J3 120 deg/s
+# (2.0944 rad/s), J4-J6 180 deg/s (3.1416 rad/s). Source:
+# https://www.fairino.us/post/fairino-fr20-vs-universal-robots-ur20-which-20-kg-class-collaborative-robot-offers-better-value
 # RoboPlan/TOPP-RA also needs acceleration limits.
 #
 # FAIRINO's MoveIt config does not provide real acceleration limits, so these
@@ -9,20 +12,26 @@
 
 joint_limits:
   j1:
+    max_velocity: [2.0944]
     max_acceleration: [1.0]
     max_jerk: [5.0]
   j2:
+    max_velocity: [2.0944]
     max_acceleration: [1.0]
     max_jerk: [5.0]
   j3:
+    max_velocity: [2.0944]
     max_acceleration: [1.0]
     max_jerk: [5.0]
   j4:
+    max_velocity: [3.1416]
     max_acceleration: [1.0]
     max_jerk: [5.0]
   j5:
+    max_velocity: [3.1416]
     max_acceleration: [1.0]
     max_jerk: [5.0]
   j6:
+    max_velocity: [3.1416]
     max_acceleration: [1.0]
     max_jerk: [5.0]

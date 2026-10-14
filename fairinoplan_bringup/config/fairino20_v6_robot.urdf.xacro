@@ -3,6 +3,8 @@
 
   <xacro:arg name="initial_positions_file" default="initial_positions.yaml"/>
   <xacro:arg name="use_mock_hardware" default="false"/>
+  <xacro:arg name="controller_ip" default="192.168.58.2"/>
+  <xacro:arg name="allow_safety_config_writes" default="false"/>
 
   <!-- Geometry + kinematic model. -->
   <xacro:include filename="$(find fairino_description)/urdf/fairino20_v6.urdf"/>
@@ -13,6 +15,8 @@
   <xacro:fairino20_v6_robot_ros2_control
     name="FairinoSystem"
     initial_positions_file="$(arg initial_positions_file)"
-    use_mock_hardware="$(arg use_mock_hardware)"/>
+    use_mock_hardware="$(arg use_mock_hardware)"
+    controller_ip="$(arg controller_ip)"
+    allow_safety_config_writes="$(arg allow_safety_config_writes)"/>
 
 </robot>

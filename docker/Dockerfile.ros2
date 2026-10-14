@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-${ROS_DISTRO}-joint-state-broadcaster \
       ros-${ROS_DISTRO}-joint-state-publisher-gui \
       ros-${ROS_DISTRO}-joint-trajectory-controller \
+      ros-${ROS_DISTRO}-position-controllers \
       ros-${ROS_DISTRO}-moveit-configs-utils \
       ros-${ROS_DISTRO}-moveit-kinematics \
       ros-${ROS_DISTRO}-moveit-planners \
@@ -35,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-${ROS_DISTRO}-pluginlib \
       ros-${ROS_DISTRO}-robot-state-publisher \
       ros-${ROS_DISTRO}-ros2-control-test-assets \
+      ros-${ROS_DISTRO}-ros2controlcli \
       ros-${ROS_DISTRO}-rosidl-default-generators \
       ros-${ROS_DISTRO}-rviz2 \
       ros-${ROS_DISTRO}-tf2-eigen \
@@ -43,8 +45,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-${ROS_DISTRO}-xacro \
     && rm -rf /var/lib/apt/lists/*
 
-# RoboPlan Core is an immutable underlay in the image. Only the two packages
-# required by the ROS wrappers and planers are built; example models are not.
+# RoboPlan Core is an immutable underlay in the image. The planning packages
+# and OInK are built; example models are not. Release is required: RoboPlan
+# does not set a default build type and OInK/ProxQP is ~10x slower at -O0.
 RUN mkdir -p /opt/roboplan_ws/src \
     && git clone https://github.com/open-planning/roboplan.git /opt/roboplan_ws/src/roboplan \
     && git -C /opt/roboplan_ws/src/roboplan checkout "${ROBOPLAN_VERSION}" \
@@ -52,8 +55,7 @@ RUN mkdir -p /opt/roboplan_ws/src \
     && for ignored_package in \
          roboplan_cartesian_planning \
          roboplan_example_models \
-         roboplan_examples \
-         roboplan_oink; do \
+         roboplan_examples; do \
          touch "/opt/roboplan_ws/src/roboplan/${ignored_package}/COLCON_IGNORE"; \
        done \
     \
@@ -64,6 +66,7 @@ RUN mkdir -p /opt/roboplan_ws/src \
            /opt/roboplan_ws/src/roboplan/roboplan \
            /opt/roboplan_ws/src/roboplan/roboplan_simple_ik \
            /opt/roboplan_ws/src/roboplan/roboplan_rrt \
+           /opt/roboplan_ws/src/roboplan/roboplan_oink \
            /opt/roboplan_ws/src/roboplan/roboplan_toppra \
          --ignore-src \
          --rosdistro "${ROS_DISTRO}" \
@@ -76,8 +79,10 @@ RUN mkdir -p /opt/roboplan_ws/src \
          --packages-up-to \
            roboplan_simple_ik \
            roboplan_rrt \
+           roboplan_oink \
            roboplan_toppra \
          --cmake-args \
+           -DCMAKE_BUILD_TYPE=Release \
            -DBUILD_TESTING=OFF \
            -DGENERATE_PYTHON_STUBS=OFF \
     \
@@ -85,6 +90,13 @@ RUN mkdir -p /opt/roboplan_ws/src \
          /opt/roboplan_ws/build \
          /opt/roboplan_ws/log \
          /var/lib/apt/lists/*
+
+# Ubuntu 22.04/ROS Humble ships NumPy 1.21. Trimesh 5 uses newer NumPy
+# typing syntax during import, so keep the Viser dependency on the compatible
+# Trimesh 3 series.
+RUN python3 -m pip install --no-cache-dir \
+      'viser>=1.0.29,<2.0' \
+      'trimesh>=3.21.7,<4.0'
 
 
 RUN groupadd --gid "${ROS_GID}" ros \

@@ -1,0 +1,24 @@
+# Controlled FAIRINO recovery executed by the hardware plugin, which owns the
+# SDK connection. Steps that are not requested are skipped and reported.
+#
+# Sequence: disarm ServoJ streaming -> ServoMoveEnd(UDP) -> StopMotion() ->
+# wait for standstill -> ResetAllError() -> re-read main/sub code ->
+# [RobotEnable(1)] -> ServoMoveStart(UDP) -> streaming WAIT_SYNC.
+# Streaming is armed only after the active controller commands the measured
+# position (no jump on resume).
+
+bool reset_errors        # call ResetAllError() and verify the codes cleared
+bool enable_robot        # call RobotEnable(1) if the robot is disabled
+bool restart_servo       # call ServoMoveStart(UDP) and enter WAIT_SYNC
+string requested_by      # audit: who requested the recovery
+string reason            # audit: why
+---
+bool success
+string failed_step
+int32 failed_step_code
+int32 main_error_code    # codes read after ResetAllError()
+int32 sub_error_code
+bool robot_enabled
+string[] steps           # human readable step log with return codes
+float64 duration_s
+string message

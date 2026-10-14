@@ -1,0 +1,72 @@
+# Default parameters of fairino_cartesian_servo. Sources and the rationale for
+# every limit are documented in docs/fairino_speed_configuration.md.
+fairino_cartesian_servo:
+  ros__parameters:
+    joint_names: [j1, j2, j3, j4, j5, j6]
+    group: fairino20_v6_group
+    base_frame: base_link
+    tip_frame: wrist3_link
+    command_topic: /fairino_servo_controller/commands
+    servo_controller: fairino_servo_controller
+    trajectory_controller: fairino20_controller
+
+    # Rates. OInK runs at solver_frequency; joint references are interpolated
+    # to command_frequency (= ros2_control and ServoJ rate). The 1 kHz solver
+    # is the benchmarked default (docs/servo_benchmark.md).
+    command_frequency: 1000.0
+    solver_frequency: 1000.0
+
+    # Reference shaping.
+    filter_tau: 0.05             # SE3LowPassFilter time constant [s]
+    max_linear_speed: 1.0        # Cartesian TCP rate limit [m/s] (FR20 typical TCP speed 2 m/s)
+    max_angular_speed: 3.1416    # Cartesian rate limit [rad/s]
+
+    # OInK limits (software limits, not FAIRINO safety limits).
+    max_joint_velocity_deg_s: [120.0, 120.0, 120.0, 180.0, 180.0, 180.0]  # FR20 maxima
+    velocity_scale: 1.0
+    use_acceleration_limit: true
+    # Peak acceleration the FAIRINO controller planned for MoveJ at 100 %
+    # (SimMachine 3.9.9: 541.7 deg/s^2 on every joint). Not a published FR20 value.
+    max_joint_acceleration_deg_s2: [540.0, 540.0, 540.0, 540.0, 540.0, 540.0]
+    position_limit_gain: 0.5
+    position_cost: 1.0
+    orientation_cost: 1.0
+    task_gain: 1.0
+    lm_damping: 0.0
+    regularization: 1.0e-6
+    qp_max_iterations: 200
+
+    # Phase 2 only (benchmarked separately): RoboPlan self-collision barrier on
+    # the convex-hull collision model (config/fairino20_v6_servo_collision.urdf).
+    # d_min stays below the 17 mm structural clearance between the forearm and
+    # wrist2 housings, which the hull model reports at every pose.
+    self_collision_pairs: 0
+    self_collision_convex: true
+    self_collision_d_min: 0.005
+    self_collision_d_max: 0.25
+    self_collision_gain: 20.0                    # approach speed <= gain*h/(1+h) m/s
+    self_collision_safe_displacement_gain: 0.0   # >0 freezes the arm (|J_h| ~ 0 pairs)
+
+    # Watchdogs.
+    robot_status_required: true
+    joint_state_timeout: 0.1
+    robot_status_timeout: 0.5
+    robot_feedback_timeout: 0.1
+    target_timeout: 1.0
+    target_reacquire_translation: 0.01
+    target_reacquire_rotation: 0.1
+    max_tracking_error: 0.15
+    joint_limit_margin: 0.0087
+
+    # Recovery.
+    auto_recovery: true
+    max_recovery_attempts: 2
+    recovery_cooldown: 3.0
+    recovery_attempt_window: 120.0
+    standstill_timeout: 1.0
+    standstill_velocity_deg_s: 0.5
+
+    # Scheduling.
+    realtime_priority: 80
+    cpu_affinity: -1
+    status_rate: 10.0

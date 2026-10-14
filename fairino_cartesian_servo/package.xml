@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>fairino_cartesian_servo</name>
+  <version>0.1.0</version>
+  <description>
+    RoboPlan OInK Cartesian servo for the FAIRINO FR20: SE(3) filter, Cartesian
+    rate limiter, OInK with joint position/velocity/acceleration limits, 1 kHz
+    joint commands for a JointGroupPositionController, controller switching,
+    FAIRINO fault classification and controlled recovery.
+  </description>
+  <maintainer email="milos.nikolic@spes.ai">Milos Nikolic</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>ament_index_cpp</depend>
+  <depend>controller_manager_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>eigen</depend>
+  <depend>fairino_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>pinocchio</depend>
+  <depend>rclcpp</depend>
+  <depend>roboplan</depend>
+  <depend>roboplan_oink</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+
+  <exec_depend>fairino_description</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
