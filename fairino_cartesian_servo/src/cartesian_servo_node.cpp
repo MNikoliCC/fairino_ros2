@@ -108,7 +108,7 @@ void CartesianServoNode::declareAndLoadParameters() {
   }
   group_name_ = declare_parameter<std::string>("group", "fairino20_v6_group");
   base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
-  tip_frame_ = declare_parameter<std::string>("tip_frame", "wrist3_link");
+  tip_frame_ = declare_parameter<std::string>("tip_frame", "flange");
   command_topic_ = declare_parameter<std::string>("command_topic", "/fairino_servo_controller/commands");
   servo_controller_ = declare_parameter<std::string>("servo_controller", "fairino_servo_controller");
   trajectory_controller_ = declare_parameter<std::string>("trajectory_controller", "fairino20_controller");
@@ -124,8 +124,8 @@ void CartesianServoNode::declareAndLoadParameters() {
     throw std::invalid_argument("command_frequency must be an integer multiple of solver_frequency");
   }
 
-  filter_tau_ = declare_parameter<double>("filter_tau", 0.05);
-  max_linear_speed_ = declare_parameter<double>("max_linear_speed", 1.0);
+  filter_tau_ = declare_parameter<double>("filter_tau", 0.03);
+  max_linear_speed_ = declare_parameter<double>("max_linear_speed", 2.0);
   max_angular_speed_ = declare_parameter<double>("max_angular_speed", M_PI);
 
   // FAIRINO FR20 joint speed maxima (J1-J3 120 deg/s, J4-J6 180 deg/s).
@@ -1802,7 +1802,7 @@ bool CartesianServoNode::solveStep(Clock::time_point now) {
   timing_filter_->record(millisecondsBetween(limiter_start, filter_start));
   timing_rate_limiter_->record(millisecondsBetween(oink_start, limiter_start));
 
-  // RoboPlan OInK: FrameTask base_link -> wrist3_link with position, velocity
+  // RoboPlan OInK: FrameTask base_link -> flange with position, velocity
   // and acceleration limits (and the optional self-collision barrier).
   frame_task_->setTargetFrameTransform(limited_target_.toHomogeneousMatrix());
   if (acceleration_limit_) {

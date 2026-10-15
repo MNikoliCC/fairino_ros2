@@ -58,6 +58,13 @@ float64[6] joint_velocity_deg_s
 float64[6] target_joint_velocity_deg_s
 int32 servoj_cmd_num            # servoJCmdNum reported by the controller
 
+# --- Cartesian state as the FAIRINO WebApp shows it (base frame) -----------
+# x, y, z [mm], rx, ry, rz [deg] (rotation about the fixed axes X, Y, Z).
+int32 tool_number               # active tool coordinate system (0 = flange)
+int32 user_frame_number         # active workpiece coordinate system
+float64[6] flange_pose          # flange_cur_pos
+float64[6] tcp_pose             # tl_cur_pos: TCP of the active tool
+
 # --- ros2_control / ServoJ streaming (measured inside read()/write()) ------
 uint8 STREAMING_DISARMED = 0    # no ServoJ is sent; requires recover/arm service
 uint8 STREAMING_WAIT_SYNC = 1   # armed once the command matches the measured position

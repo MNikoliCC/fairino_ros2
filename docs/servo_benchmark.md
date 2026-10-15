@@ -106,6 +106,20 @@ state was 0 and every ServoJ return code 0 in all runs; FAIRINO main/sub codes
 stayed 0/0. `/joint_states` ran at 1000 Hz in these runs and at 250 Hz in the
 final configuration (equal to the FAIRINO feedback rate).
 
+### Servo parameters of 2026-10-15
+
+Tip frame `flange` (TCP of FAIRINO tool 0, 120 mm ahead of `wrist3_link`),
+filter τ 0.03 s (was 0.05 s), Cartesian limit 2.0 m/s (was 1.0 m/s; the
+circles stay below 0.5 m/s, so only the filter changes their tracking):
+
+| Run | TCP error RMS / max [mm] | max \|q_cmd − q_meas\| [mrad] | `oink` p99 / max [ms] | overruns | ServoJ calls/s | probes / drift corrections |
+|---|---|---:|---|---:|---:|---|
+| SimMachine, slow | 5.7 / 6.8 (was 7.0 / 8.3) | 8.7 | 0.103 / 0.159 | 0 | 682 | 1 / 1 |
+| SimMachine, fast | 43.2 / 48.2 (was 51.1–51.4) | 34.0 | 0.107 / 0.172 | 0 | 823 | 0 / 0 |
+
+Both runs ACTIVE for 60 s, ServoJ errors 0, guard trips 0, codes 0/0. The
+tables above were measured with the previous tip frame and filter.
+
 ### SimMachine ServoJ consumption and flow control
 
 SimMachine does not run in real time. It executed 900–950 ServoJ points/s at

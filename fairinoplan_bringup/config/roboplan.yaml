@@ -6,32 +6,35 @@
 # https://www.fairino.us/post/fairino-fr20-vs-universal-robots-ur20-which-20-kg-class-collaborative-robot-offers-better-value
 # RoboPlan/TOPP-RA also needs acceleration limits.
 #
-# FAIRINO's MoveIt config does not provide real acceleration limits, so these
-# are intentionally conservative starter values. Verify/tune them against the
-# FR20 controller/manual before increasing them on the real robot.
+# FAIRINO publishes no FR20 joint accelerations. max_acceleration is the peak
+# the FAIRINO controller itself planned for MoveJ at 100 % on SimMachine 3.9.9
+# (541.7 deg/s^2), i.e. 540 deg/s^2 = 9.4248 rad/s^2, the same limit as the
+# Cartesian servo (was 1.0 rad/s^2; 5.0 and 9.42 tested on SimMachine, see
+# docs/fairino_speed_configuration.md). Lower it (e.g. 2-5 rad/s^2) for the
+# first sessions on the real robot. TOPP-RA does not use max_jerk.
 
 joint_limits:
   j1:
     max_velocity: [2.0944]
-    max_acceleration: [1.0]
+    max_acceleration: [9.4248]
     max_jerk: [5.0]
   j2:
     max_velocity: [2.0944]
-    max_acceleration: [1.0]
+    max_acceleration: [9.4248]
     max_jerk: [5.0]
   j3:
     max_velocity: [2.0944]
-    max_acceleration: [1.0]
+    max_acceleration: [9.4248]
     max_jerk: [5.0]
   j4:
     max_velocity: [3.1416]
-    max_acceleration: [1.0]
+    max_acceleration: [9.4248]
     max_jerk: [5.0]
   j5:
     max_velocity: [3.1416]
-    max_acceleration: [1.0]
+    max_acceleration: [9.4248]
     max_jerk: [5.0]
   j6:
     max_velocity: [3.1416]
-    max_acceleration: [1.0]
+    max_acceleration: [9.4248]
     max_jerk: [5.0]

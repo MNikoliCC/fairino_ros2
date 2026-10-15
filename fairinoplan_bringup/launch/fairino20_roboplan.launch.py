@@ -90,7 +90,7 @@ def generate_launch_description():
             {
                 "joint_group": "fairino20_v6_group",
                 "base_link": "base_link",
-                "tip_link": "wrist3_link",
+                "tip_link": "flange",
                 "joint_state_topic": "/joint_states",
                 "action_server_name":
                     "/fairino20_controller/follow_joint_trajectory",

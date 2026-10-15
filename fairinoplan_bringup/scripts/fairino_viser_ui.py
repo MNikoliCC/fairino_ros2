@@ -6,6 +6,10 @@ The UI only displays state and publishes requests: the TCP gizmo publishes a
 PoseStamped target, buttons call services asynchronously. No IK, no solver and
 no FAIRINO SDK call runs in a Viser callback. The robot is drawn from
 /joint_states at ``display_frequency`` (30 Hz).
+
+The gizmo and every published pose use the URDF frame ``flange``, which
+coincides with the TCP of FAIRINO tool 0 as the WebApp/SimMachine shows it.
+A planned trajectory is previewed with a translucent robot before Execute.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
-from std_srvs.srv import SetBool, Trigger
+from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory
 
 
@@ -72,6 +76,9 @@ class FairinoViserUi(Node):
         self.declare_parameter("display_frequency", 30.0)
         self.declare_parameter("heartbeat_frequency", 30.0)
         self.declare_parameter("robot_status_required", True)
+        self.declare_parameter("tip_frame", "flange")
+        # Home pose for the "Home" button [deg], j1..j6 (also the mock start pose).
+        self.declare_parameter("home_joints_deg", [0.0, -90.0, 90.0, -90.0, -90.0, 0.0])
         self._robot_status_required = bool(self.get_parameter("robot_status_required").value)
 
         # Same URDF as RoboPlan.
@@ -93,12 +100,19 @@ class FairinoViserUi(Node):
             port=int(self.get_parameter("port").value),
         )
         self._viz.initViewer(viewer=self._server, open=False, loadModel=True)
+        # Translucent copy of the robot that replays a planned trajectory.
+        self._preview = ViserVisualizer(self._model, collision_model, visual_model)
+        self._preview.initViewer(viewer=self._server, open=False, loadModel=False)
+        self._preview.loadViewerModel(rootNodeName="plan_preview", visual_color=[0.2, 0.55, 1.0, 0.35])
+        self._preview.displayCollisions(False)
+        self._preview.displayFrames(False)
+        self._preview.displayVisuals(False)
 
         self._joint_q_index = {
             name: self._model.joints[self._model.getJointId(name)].idx_q for name in JOINT_NAMES
         }
         self._base_frame = self._model.getFrameId("base_link")
-        self._tip_frame = self._model.getFrameId("wrist3_link")
+        self._tip_frame = self._model.getFrameId(str(self.get_parameter("tip_frame").value))
         self._lock = threading.RLock()
         self._q = pin.neutral(self._model)
         self._have_joint_state = False
@@ -108,12 +122,18 @@ class FairinoViserUi(Node):
         self._robot: RobotStatus | None = None
         self._plan_status: dict = {"state": "unknown", "message": "planner not running"}
         self._events: deque = deque(maxlen=60)
+        # Planned trajectory for the preview: times [s] and joint positions (N x 6, JOINT_NAMES).
+        self._preview_times: np.ndarray | None = None
+        self._preview_positions: np.ndarray | None = None
+        self._preview_start = 0.0
+        self._preview_shown = False
         self._last_result = "—"
         self._start_time = self.get_clock().now()
 
         # ROS interfaces.
         self._target_pub = self.create_publisher(PoseStamped, "/fairino_servo/target_pose", 1)
         self._plan_goal_pub = self.create_publisher(PoseStamped, "/fairinoplan/pose_goal", 1)
+        self._joint_goal_pub = self.create_publisher(JointState, "/fairinoplan/joint_goal", 1)
         self.create_subscription(JointState, "/joint_states", self._on_joint_state, 1)
         self.create_subscription(ServoStatus, "/fairino_servo/status", self._on_servo_status, 5)
         self.create_subscription(RobotStatus, "/fairino_robot/status", self._on_robot_status, 5)
@@ -130,7 +150,6 @@ class FairinoViserUi(Node):
             name: self.create_client(Trigger, f"/fairino_servo/{name}")
             for name in ["enable", "hold", "disable", "recover", "reset_fault", "reset_target"]
         }
-        self._mode_client = self.create_client(SetBool, "/fairino_servo/set_mode")
         self._execute_client = self.create_client(Trigger, "/fairinoplan/execute")
         self._speed_client = self.create_client(SetGlobalSpeed, "/fairino_robot/set_global_speed")
         self._safety_client = self.create_client(SetSafetySpeed, "/fairino_robot/set_safety_speed")
@@ -139,6 +158,7 @@ class FairinoViserUi(Node):
         self._build_gui()
 
         self.create_timer(1.0 / float(self.get_parameter("display_frequency").value), self._display)
+        self.create_timer(1.0 / float(self.get_parameter("display_frequency").value), self._animate_preview)
         self.create_timer(
             1.0 / float(self.get_parameter("heartbeat_frequency").value), self._heartbeat
         )
@@ -153,10 +173,14 @@ class FairinoViserUi(Node):
         scene.add_grid("/ground", width=4.0, height=4.0, cell_size=0.25, position=(0.0, 0.0, 0.0))
         self._server.initial_camera.position = (1.6, -2.6, 2.0)
         self._server.initial_camera.look_at = (-0.4, 0.0, 0.7)
+        # Arrows: one axis; squares: translation in the XY/XZ/YZ plane of the
+        # TCP frame; rings: rotation.
         self._marker = scene.add_transform_controls(
-            "/fairino/tcp_target", scale=0.25, depth_test=False, disable_sliders=True
+            "/fairino/tcp_target", scale=0.25, depth_test=False, disable_sliders=False
         )
         self._marker.on_update(lambda _: self._on_marker_moved())
+        # Measured TCP (flange) axes; the gizmo shows the target.
+        self._tcp_axes = scene.add_frame("/fairino/tcp_measured", axes_length=0.08, axes_radius=0.004)
         self._path_handle = None
 
     # -------------------------------------------------------------------- gui
@@ -167,23 +191,34 @@ class FairinoViserUi(Node):
         tabs = gui.add_tab_group()
 
         with tabs.add_tab("Control"):
-            self._mode_dropdown = gui.add_dropdown(
-                "Controller mode", ["Plan mode", "Servo mode"], initial_value="Plan mode"
-            )
-            self._mode_button = gui.add_button("Apply mode", hint="Plan: trajectory controller. Servo: group position controller (HOLD).")
+            # Enable Servo switches to servo mode, Disable Servo back to plan mode.
             with gui.add_folder("Servo"):
                 self._enable_button = gui.add_button("Enable Servo", color="green")
-                self._hold_button = gui.add_button("Hold", color="yellow")
-                self._disable_button = gui.add_button("Disable Servo")
+                self._hold_button = gui.add_button(
+                    "Servo Hold", color="yellow", hint="Stop tracking the gizmo; the servo keeps the joints"
+                )
+                self._disable_button = gui.add_button(
+                    "Plan Mode", hint="Leave servoing: the trajectory controller holds the robot (Plan / Execute)"
+                )
                 self._reset_target_button = gui.add_button("Reset Target to Current TCP")
             with gui.add_folder("Plan (RRT + TOPP-RA)"):
                 self._plan_button = gui.add_button("Plan", hint="Plan to the gizmo pose (plan mode only)")
+                self._home_button = gui.add_button(
+                    "Home", hint="Plan to the home joint pose; check the preview, then Execute"
+                )
+                self._preview_checkbox = gui.add_checkbox(
+                    "Preview planned motion", True, hint="Translucent robot replays the plan before Execute"
+                )
+                self._preview_speed = gui.add_slider("Preview speed", min=0.25, max=2.0, step=0.25, initial_value=1.0)
                 self._execute_button = gui.add_button("Execute", color="blue")
                 self._plan_markdown = gui.add_markdown("—")
             with gui.add_folder("Fault"):
                 self._fault_markdown = gui.add_markdown("—")
-                self._recover_button = gui.add_button("Recover", color="orange")
-                self._reset_fault_button = gui.add_button("Reset Fault", color="red")
+                self._recover_button = gui.add_button(
+                    "Recover",
+                    color="orange",
+                    hint="FAULT: controlled recovery; LOCKOUT or unknown fault: operator reset once the cause is gone",
+                )
             self._result_markdown = gui.add_markdown("**Last command:** —")
 
         with tabs.add_tab("Status"):
@@ -219,15 +254,14 @@ class FairinoViserUi(Node):
         with tabs.add_tab("Audit"):
             self._audit_markdown = gui.add_markdown("no events yet")
 
-        self._mode_button.on_click(lambda _: self._apply_mode())
         self._enable_button.on_click(lambda _: self._trigger("enable"))
-        self._hold_button.on_click(lambda _: self._trigger("hold"))
-        self._disable_button.on_click(lambda _: self._trigger("disable"))
+        self._hold_button.on_click(lambda _: self._trigger("hold", "Servo Hold"))
+        self._disable_button.on_click(lambda _: self._trigger("disable", "Plan Mode"))
         self._reset_target_button.on_click(lambda _: self._reset_target())
         self._plan_button.on_click(lambda _: self._plan())
+        self._home_button.on_click(lambda _: self._plan_home())
         self._execute_button.on_click(lambda _: self._execute())
-        self._recover_button.on_click(lambda _: self._trigger("recover"))
-        self._reset_fault_button.on_click(lambda _: self._trigger("reset_fault"))
+        self._recover_button.on_click(lambda _: self._recover())
         self._speed_button.on_click(lambda _: self._apply_speed())
         self._safety_button.on_click(lambda _: self._apply_safety_speed())
 
@@ -300,6 +334,12 @@ class FairinoViserUi(Node):
         self._path_handle = self._server.scene.add_spline_catmull_rom(
             "/fairino/planned_path", points=np.asarray(points), thickness=0.006, color=(30, 120, 220)
         )
+        times = np.array([p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in msg.points])
+        positions = np.array([[p.positions[i] for i in indices] for p in msg.points])
+        with self._lock:
+            self._preview_times = times
+            self._preview_positions = positions
+            self._preview_start = time.monotonic()
 
     # ------------------------------------------------------------ kinematics
     def _world_poses(self) -> tuple[pin.SE3, pin.SE3]:
@@ -354,11 +394,36 @@ class FairinoViserUi(Node):
                 return
             q = self._q.copy()
             initialize = not self._marker_initialized
+            _, world_tip = self._world_poses()
         self._viz.display(q)
+        quaternion = pin.Quaternion(world_tip.rotation)
+        self._tcp_axes.position = world_tip.translation.copy()
+        self._tcp_axes.wxyz = np.array([quaternion.w, quaternion.x, quaternion.y, quaternion.z])
         if initialize:
             with self._lock:
-                _, world_tip = self._world_poses()
                 self._set_marker(world_tip)
+
+    def _animate_preview(self) -> None:
+        # The preview runs only while a plan waits for Execute; it loops with a
+        # 1 s pause on the goal pose. It never commands the robot.
+        with self._lock:
+            times = self._preview_times
+            positions = self._preview_positions
+            start = self._preview_start
+            planned = self._plan_status.get("state") == "planned"
+            q = self._q.copy()
+        show = bool(self._preview_checkbox.value) and planned and times is not None and len(times) > 1
+        if show != self._preview_shown:
+            self._preview.displayVisuals(show)
+            self._preview_shown = show
+        if not show:
+            return
+        duration = float(times[-1])
+        elapsed = (time.monotonic() - start) * float(self._preview_speed.value)
+        t = min(elapsed % (duration + 1.0), duration)
+        for column, name in enumerate(JOINT_NAMES):
+            q[self._joint_q_index[name]] = np.interp(t, times, positions[:, column])
+        self._preview.display(q)
 
     def _heartbeat(self) -> None:
         # A still gizmo is still a valid reference. The heartbeat only runs
@@ -397,13 +462,23 @@ class FairinoViserUi(Node):
 
         future.add_done_callback(done)
 
-    def _trigger(self, name: str) -> None:
-        self._call(self._servo_clients[name], Trigger.Request(), name.replace("_", " ").title())
+    def _trigger(self, name: str, label: str | None = None) -> None:
+        self._call(self._servo_clients[name], Trigger.Request(), label or name.replace("_", " ").title())
 
-    def _apply_mode(self) -> None:
-        request = SetBool.Request()
-        request.data = self._mode_dropdown.value == "Servo mode"
-        self._call(self._mode_client, request, f"Mode → {self._mode_dropdown.value}")
+    def _recover(self) -> None:
+        # One operator button for both servo services; the servo keeps its
+        # rules (no exit from LOCKOUT while the cause is active, no guessed
+        # procedure for unknown codes) and every recovery ends without motion.
+        servo = self._servo
+        if servo is not None and servo.state == "LOCKOUT":
+            self._trigger("reset_fault")
+            return
+
+        def fallback(response) -> None:
+            if not response.success and response.message.startswith("unknown fault"):
+                self._trigger("reset_fault")
+
+        self._call(self._servo_clients["recover"], Trigger.Request(), "Recover", on_done=fallback)
 
     def _reset_target(self) -> None:
         if self._servo_clients["reset_target"].service_is_ready():
@@ -426,6 +501,19 @@ class FairinoViserUi(Node):
             return
         self._plan_goal_pub.publish(pose)
         self._set_result("Plan: goal sent to /fairinoplan/pose_goal")
+
+    def _plan_home(self) -> None:
+        servo = self._servo
+        if servo is not None and (servo.state != "DISABLED" or servo.mode != "plan"):
+            self._set_result("Home: only in plan mode with the servo DISABLED")
+            return
+        goal = JointState()
+        goal.header.stamp = self.get_clock().now().to_msg()
+        goal.name = list(JOINT_NAMES)
+        goal.position = [float(np.radians(v)) for v in self.get_parameter("home_joints_deg").value]
+        self._joint_goal_pub.publish(goal)
+        home = ", ".join(f"{v:.0f}" for v in self.get_parameter("home_joints_deg").value)
+        self._set_result(f"Home ({home} deg): goal sent; check the preview, then Execute")
 
     def _execute(self) -> None:
         servo = self._servo
@@ -534,7 +622,9 @@ class FairinoViserUi(Node):
                 f"sub={servo.sub_error_code} sdk={servo.sdk_return_code}  \n{servo.fault_description}  \n"
                 f"Policy: `{servo.fault_policy}` · Action: {servo.suggested_action}  \n"
                 f"Recovery attempts {servo.recovery_attempts}/{servo.max_recovery_attempts} · "
-                f"last: {servo.last_recovery_result}"
+                f"last: {servo.last_recovery_result}  \n"
+                "**Recover** runs the controlled recovery, or the operator reset (\"Reset Fault\") "
+                "for LOCKOUT and unknown faults once the cause is removed."
             )
         else:
             self._fault_markdown.content = (
@@ -548,9 +638,9 @@ class FairinoViserUi(Node):
         self._enable_button.disabled = state not in ("DISABLED", "HOLD")
         self._hold_button.disabled = state != "ACTIVE"
         self._disable_button.disabled = state in ("DISABLED", "RECOVERING", "SYNCING", "UNKNOWN")
-        self._recover_button.disabled = state != "FAULT"
-        self._reset_fault_button.disabled = state not in ("FAULT", "LOCKOUT")
+        self._recover_button.disabled = state not in ("FAULT", "LOCKOUT")
         self._plan_button.disabled = not plan_mode
+        self._home_button.disabled = not plan_mode
         self._execute_button.disabled = not plan_mode or plan.get("state") != "planned"
         self._safety_button.disabled = robot is None or not robot.safety_config_writes_allowed
 
@@ -571,6 +661,7 @@ class FairinoViserUi(Node):
                 f"| OInK / command rate | {servo.solver_frequency_hz:.0f} Hz / {servo.command_frequency_hz:.0f} Hz, "
                 f"{'SCHED_FIFO' if servo.realtime_scheduling else 'no RT scheduling'} |",
             ]
+        lines += self._tcp_rows(robot)
         if robot is not None:
             lines += [
                 f"| FAIRINO connection | {'connected' if robot.connected else '**DISCONNECTED**'} "
@@ -613,6 +704,41 @@ class FairinoViserUi(Node):
                     f"{t.overruns_window}/{t.overruns_total} |"
                 )
             self._timing_markdown.content = "\n".join(timing)
+
+    def _tcp_rows(self, robot) -> list[str]:
+        """Viser TCP (URDF flange from /joint_states) next to the FAIRINO TCP, in
+        the WebApp convention: mm and rx, ry, rz [deg] about the fixed axes."""
+        with self._lock:
+            if not self._have_joint_state:
+                return []
+            world_base, world_tip = self._world_poses()
+        tip = world_base.inverse() * world_tip
+        rpy = np.degrees(pin.rpy.matrixToRpy(tip.rotation))
+        position = tip.translation * 1000.0
+        rows = [
+            f"| TCP (Viser gizmo frame `flange`) | {position[0]:.1f}, {position[1]:.1f}, {position[2]:.1f} mm · "
+            f"{rpy[0]:.2f}, {rpy[1]:.2f}, {rpy[2]:.2f} deg |"
+        ]
+        if robot is None or not robot.connected:
+            return rows
+        tcp = list(robot.tcp_pose)
+        fairino = pin.SE3(pin.rpy.rpyToMatrix(*np.radians(tcp[3:])), np.array(tcp[:3]) / 1000.0)
+        delta = tip.inverse() * fairino
+        rows.append(
+            f"| TCP (FAIRINO, tool {robot.tool_number}) | {tcp[0]:.1f}, {tcp[1]:.1f}, {tcp[2]:.1f} mm · "
+            f"{tcp[3]:.2f}, {tcp[4]:.2f}, {tcp[5]:.2f} deg |"
+        )
+        note = (
+            ""
+            if robot.tool_number == 0
+            else " — **the gizmo is at the flange; FAIRINO tool "
+            f"{robot.tool_number} has its own TCP offset**"
+        )
+        rows.append(
+            f"| Viser vs FAIRINO TCP | {np.linalg.norm(delta.translation) * 1000.0:.2f} mm, "
+            f"{np.degrees(np.linalg.norm(pin.log3(delta.rotation))):.2f} deg{note} |"
+        )
+        return rows
 
     def _update_speed(self, servo, robot) -> None:
         if robot is None:

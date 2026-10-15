@@ -68,7 +68,7 @@ class Benchmark(Node):
         urdf = (get_package_share_path("fairino_description") / "urdf" / "fairino20_v6.urdf").read_text()
         self.model = pin.buildModelFromXML(urdf)
         self.data = self.model.createData()
-        self.tip = self.model.getFrameId("wrist3_link")
+        self.tip = self.model.getFrameId("flange")
 
     def measured_tcp(self) -> np.ndarray | None:
         with self.lock:

@@ -60,6 +60,12 @@ Executed on 2026-10-14/15 unless noted. Tools used:
 | T30 | Flow-control starvation | fast circle with the flow counters logged at 50 Hz | — | **Finding then PASS**: stream stuck at exactly 250 points/s (estimate "full", FIFO empty), fast circle FAULT in 2 of 4 runs; with the drift probe 3/3 fast runs ACTIVE, one correction in 2 runs |
 | T31 | Enable while a trajectory is playing | execute a 40° J1 plan, Enable after 0.4 s, Enable again at rest | refused while moving, accepted at rest | **PASS** ("robot is moving (trajectory running?)", then ACTIVE) |
 | T32 | Recovery smoke test (SimMachine, final code) | T26–T28 in one script, 14 checks | all pass | **PASS 14/14** |
+| T33 | TCP frame vs FAIRINO | `GetForwardKin` for 12 random configurations vs URDF; live servo reset pose vs `tl_cur_pos` | gizmo/servo TCP = FAIRINO TCP (tool 0) | **Finding then PASS**: the gizmo was on `wrist3_link`, 120 mm behind the FAIRINO flange (same orientation); new URDF frame `flange`: 0.011 mm / 0.0004° live, Status tab shows 0.01 mm |
+| T34 | Plan-mode acceleration | 7 plan+execute goals (joint and Cartesian) at 5.0 and 9.42 rad/s² | all succeed, no FAIRINO code, no disarm | **PASS**: J1 40° 0.76 s → 0.61 s (≈ 1.7 s at 1.0 rad/s²), peak 120 deg/s |
+| T35 | Plan preview in Viser | plan without Execute; screenshots 0.3 s apart (headless Chrome) | translucent robot replays the plan, loops, hidden after Execute | **PASS** (ghost moves from home along the blue path to the goal; 1 s pause on the goal) |
+| T36 | Servo with τ 0.03 s and 2.0 m/s | slow/fast circle 60 s | ACTIVE, no fault | **PASS**: TCP RMS 5.7 mm / 43.2 mm (was 7.0 / 51) |
+| T37 | Regression after T33–T36 | mock state machine, unit tests | all pass | **PASS** 15/15, 15/15 |
+| T38 | Simplified operator UI (headless Chrome clicks) | no mode switch / Replay / separate Reset Fault; Home → preview → Execute; Enable → external stop → Recover; hardware inactive → Recover → active → Recover | buttons work as documented | **PASS**: robot from (40, −80, 100, −110, −90, 20)° to home (0, −90, 90, −90, −90, 0)°; FAULT → Recover → HOLD; LOCKOUT: Recover refused while the status was missing, accepted after activation → DISABLED |
 
 ## 3. Not tested on SimMachine
 

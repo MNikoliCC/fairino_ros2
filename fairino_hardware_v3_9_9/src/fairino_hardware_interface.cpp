@@ -1038,7 +1038,11 @@ void FairinoHardwareInterface::publish_status()
             msg.joint_position_deg[j] = pkg.jt_cur_pos[j];
             msg.joint_velocity_deg_s[j] = pkg.actual_qd[j];
             msg.target_joint_velocity_deg_s[j] = pkg.targetJointVel[j];
+            msg.flange_pose[j] = pkg.flange_cur_pos[j];
+            msg.tcp_pose[j] = pkg.tl_cur_pos[j];
         }
+        msg.tool_number = pkg.tool;
+        msg.user_frame_number = pkg.user;
         msg.out_soft_limit_error = pkg.outSoftLimitError != 0;
         msg.abnormal_stop = pkg.abnomalStop != 0;
         msg.alarm_reboot_robot = pkg.alarmRebootRobot;

@@ -5,7 +5,7 @@ fairino_cartesian_servo:
     joint_names: [j1, j2, j3, j4, j5, j6]
     group: fairino20_v6_group
     base_frame: base_link
-    tip_frame: wrist3_link
+    tip_frame: flange           # FAIRINO flange = TCP of tool 0 (fairino20_v6.urdf)
     command_topic: /fairino_servo_controller/commands
     servo_controller: fairino_servo_controller
     trajectory_controller: fairino20_controller
@@ -17,8 +17,8 @@ fairino_cartesian_servo:
     solver_frequency: 1000.0
 
     # Reference shaping.
-    filter_tau: 0.05             # SE3LowPassFilter time constant [s]
-    max_linear_speed: 1.0        # Cartesian TCP rate limit [m/s] (FR20 typical TCP speed 2 m/s)
+    filter_tau: 0.03             # SE3LowPassFilter time constant [s] (was 0.05: less lag behind the gizmo)
+    max_linear_speed: 2.0        # Cartesian TCP (flange) rate limit [m/s] = FR20 TCP maximum 2 m/s (was 1.0)
     max_angular_speed: 3.1416    # Cartesian rate limit [rad/s]
 
     # OInK limits (software limits, not FAIRINO safety limits).

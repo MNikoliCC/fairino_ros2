@@ -163,6 +163,11 @@ attempt, a failed attempt counts as an attempt, Reset Fault clears the counters.
 
 ## 5. Operator actions, WebApp and power cycle
 
+In the Viser UI both operator procedures are behind one **Recover** button:
+FAULT → `/fairino_servo/recover` (R1), falling back to
+`/fairino_servo/reset_fault` (R2) when R1 is refused for an unknown code;
+LOCKOUT → R2. The servo-side rules below are unchanged.
+
 | Situation | Action |
 |---|---|
 | FAULT, whitelisted, auto recovery off | inspect, press **Recover** |

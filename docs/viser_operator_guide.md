@@ -59,7 +59,13 @@ servo shows FAULT with the reason.
 
 Open <http://localhost:8000> (the port is published by Docker Compose). The
 robot shows the measured joint positions (30 Hz). The gizmo is placed on the
-flange (`wrist3_link`) at startup.
+**FAIRINO TCP** at startup: the URDF frame `flange`, i.e. the TCP of FAIRINO
+tool 0 with the same position and orientation as in the WebApp/SimMachine
+(x red, y green, z blue, z out of the flange). Small axes show the measured
+TCP; the gizmo shows the target. The *Status* tab lists the Viser TCP and the
+FAIRINO TCP (`tl_cur_pos`, mm and rx/ry/rz in deg) and their difference
+(0.01 mm on SimMachine). With a FAIRINO tool other than 0 the gizmo stays on
+the flange and the Status tab says so.
 
 The panel has a summary line (state · mode · active controller · FAIRINO
 connection · reason) and four tabs:
@@ -76,19 +82,22 @@ services check again and answer with a reason in *Last command*.
 
 ## 3. Servo mode
 
-1. **Controller mode → Servo mode → Apply mode** switches to the servo
-   controller and holds (HOLD). Alternatively press **Enable Servo** directly
-   from plan mode.
-2. **Enable Servo**: the robot must be at rest (Enable is refused while a
+The *Servo* folder has three buttons: **Enable Servo** (servo mode, tracking
+the gizmo), **Servo Hold** (servo mode, not tracking) and **Plan Mode** (leave
+servoing; the trajectory controller holds the robot). There is no separate
+mode switch.
+
+1. **Enable Servo** from plan mode: the robot must be at rest (Enable is refused while a
    planned trajectory is still executing). The servo copies the measured joints
    into the command, resets the target to the current TCP, resets the filter
    and OInK state, switches controllers and becomes ACTIVE. The gizmo jumps to
-   the current flange pose: this is expected.
-3. Drag the gizmo (arrows: translation; rings: rotation). The robot follows
-   through the SE(3) filter (τ 0.05 s), the Cartesian rate limit (1 m/s, π
+   the current TCP pose: this is expected.
+2. Drag the gizmo (arrows: translation along one axis; squares: translation
+   in the XY, XZ or YZ plane of the TCP frame; rings: rotation). The robot follows
+   through the SE(3) filter (τ 0.03 s), the Cartesian rate limit (2 m/s, π
    rad/s) and OInK at the FR20 joint limits. A distant gizmo target is approached
    at these speeds, not jumped to.
-4. The gizmo must stay connected: while a browser is open, the UI republishes
+3. The gizmo must stay connected: while a browser is open, the UI republishes
    the gizmo pose at 30 Hz. If no target arrives for 1 s (browser closed,
    network lost), the servo goes to HOLD.
 
@@ -96,25 +105,34 @@ After every enable, resume or recovery the servo ignores the gizmo until it
 reports a pose within 1 cm / 0.1 rad of the reset pose. The UI does this
 automatically; it prevents an old gizmo position from pulling the robot.
 
-## 4. Hold, resume, disable
+## 4. Servo Hold, resume, Plan Mode
 
 | Button | Effect |
 |---|---|
-| **Hold** | ACTIVE → HOLD: no further target tracking; the joints decelerate at the acceleration limit (540 deg/s², at most ≈ 0.35 s from full speed) and then hold |
+| **Servo Hold** | ACTIVE → HOLD: no further target tracking; the joints decelerate at the acceleration limit (540 deg/s², at most ≈ 0.35 s from full speed) and then hold |
 | **Enable Servo** in HOLD | resume (after the deceleration has finished): target reset to the current TCP, then ACTIVE |
 | **Reset Target to Current TCP** | moves the gizmo and the servo reference to the current TCP (useful after dragging the gizmo far away). While ACTIVE and moving, the robot decelerates at the acceleration limit towards that point instead of stopping abruptly; refused while synchronizing or recovering |
-| **Disable Servo** | ACTIVE → HOLD, wait for standstill, switch back to the trajectory controller (plan mode, DISABLED). From FAULT/LOCKOUT the controller is switched but the fault state remains |
+| **Plan Mode** | ACTIVE → HOLD, wait for standstill, switch back to the trajectory controller (plan mode, state DISABLED). From FAULT/LOCKOUT the controller is switched but the fault state remains |
 
 ## 5. Plan mode (RRT + TOPP-RA)
 
-1. Make sure the summary shows `DISABLED · mode plan · controller fairino20_controller`.
-2. Move the gizmo to the goal pose.
+1. Make sure the summary shows `DISABLED · mode plan · controller fairino20_controller`
+   (press **Plan Mode** if the servo is active).
+2. Move the gizmo to the goal pose, or press **Home** instead of Plan:
+   it plans to the home joint pose (UI parameter `home_joints_deg`, default
+   0, −90, 90, −90, −90, 0 deg) through the same pipeline.
 3. **Plan**: the planner solves IK from the measured state, plans with RRT,
-   shortcuts and time-parameterizes with TOPP-RA (FR20 velocity limits). The
-   planned TCP path is drawn in blue; the planner status shows points,
-   duration and planning time.
-4. **Execute**: sends the trajectory to `fairino20_controller`. Status goes
-   `executing` → `succeeded`.
+   shortcuts and time-parameterizes with TOPP-RA (FR20 velocity limits,
+   540 deg/s²). The planned TCP path is drawn in blue; the planner status
+   shows points, duration and planning time.
+4. **Preview**: a translucent blue robot replays the planned motion in real
+   time and loops (1 s pause on the goal) until Execute. *Preview speed*
+   slows it down or speeds it up (display only), the *Preview planned motion*
+   checkbox hides it. The preview never moves the robot.
+5. **Execute**: sends exactly the planned, time-parameterized trajectory to
+   `fairino20_controller` (same timing as the preview at speed 1; the FAIRINO
+   global speed does not scale it). Status goes `executing` → `succeeded`; the
+   preview disappears.
 
 Plan and Execute are disabled in servo mode. The planner checks robot
 self-collisions; there is no environment model.
@@ -122,24 +140,34 @@ self-collisions; there is no environment model.
 ## 6. Faults and recovery
 
 The fault box shows severity, source, main/sub/SDK code, description, policy,
-suggested action and recovery attempts.
+suggested action and recovery attempts. There is one **Recover** button:
+
+- in FAULT it calls `/fairino_servo/recover` (controlled recovery, enables the
+  robot if needed); for an unknown fault code that service refuses, and the
+  button then calls `/fairino_servo/reset_fault` (operator acknowledgement, no
+  RobotEnable);
+- in LOCKOUT it calls `/fairino_servo/reset_fault`, which is refused while the
+  lockout cause is still active (E-stop pressed, door open, status missing).
+
+Suggested actions and the fault catalog still name the two procedures
+("Recover", "Reset Fault"); both are reached through this button.
 
 | State | Meaning | What to do |
 |---|---|---|
 | FAULT, policy `auto_recover` | whitelisted fault; automatic recovery runs after 3 s (if enabled) and ends in HOLD (servo mode) or DISABLED (plan mode) | check why it happened; press **Enable Servo** to continue; press **Recover** if automatic recovery is off |
-| FAULT, policy `operator_reset` | needs an operator (collision, limits, IO, unknown code, servo-side fault) | remove the cause (WebApp alarm text, drag/jog joints), then **Recover** (known faults, enables the robot) or **Reset Fault** |
-| LOCKOUT | safety signal, non-resettable fault, lost communication, or the same fault repeated after 2 recoveries | follow the suggested action; **Reset Fault** is accepted only when no lockout signal is active; power-cycle where stated |
+| FAULT, policy `operator_reset` | needs an operator (collision, limits, IO, unknown code, servo-side fault) | remove the cause (WebApp alarm text, drag/jog joints), then **Recover** |
+| LOCKOUT | safety signal, non-resettable fault, lost communication, or the same fault repeated after 2 recoveries | follow the suggested action; **Recover** (operator reset) is accepted only when no lockout signal is active; power-cycle where stated |
 | RECOVERING | hardware steps running (normally < 0.3 s) | wait |
 
 After any recovery the servo is in HOLD (servo mode) or DISABLED (plan mode)
-and never moves by itself. Every step is listed in the Audit tab.
+and never moves by itself: press **Enable Servo** to continue servoing. Every step is listed in the Audit tab.
 
 If somebody calls `/fairino_robot/stop` (or the hardware disarms ServoJ for
 any other reason) while the servo is in HOLD or ACTIVE, the servo goes to
-FAULT "hardware ServoJ streaming disarmed: …". **Reset Fault** re-arms
+FAULT "hardware ServoJ streaming disarmed: …". **Recover** re-arms
 streaming through a controlled recovery; the servo never resumes on its own.
 
-**Recover** and **Reset Fault** report "still running" (not success) when the
+**Recover** reports "still running" (not success) when the
 recovery has not finished within 60 s; read the state and the Audit tab.
 
 Communication lost or hardware deactivated (LOCKOUT "robot status
@@ -151,7 +179,7 @@ ros2 control list_hardware_components          # FairinoSystem state
 ros2 control set_hardware_component_state FairinoSystem active
 ```
 
-then **Reset Fault** and **Disable Servo** to return to plan mode.
+then **Recover** and **Plan Mode** to return to plan mode.
 
 ## 7. Speed panel
 
@@ -183,6 +211,6 @@ then **Reset Fault** and **Disable Servo** to return to plan mode.
 
 ## 9. Stop
 
-Press **Disable Servo**, then stop the launch with `Ctrl+C`. The hardware
+Press **Plan Mode**, then stop the launch with `Ctrl+C`. The hardware
 plugin ends servo mode (`ServoMoveEnd`, `StopMotion`) and closes the SDK
 connection on shutdown. Stop the containers with `./simmachine.sh down`.

@@ -136,7 +136,7 @@ class FairinoPlanExecute(Node):
 
         self.declare_parameter(
             "tip_link",
-            "wrist3_link",
+            "flange",
         )
 
         self.declare_parameter(

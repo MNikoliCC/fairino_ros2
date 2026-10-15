@@ -25,7 +25,8 @@ servo path. The RoboPlan self-collision barrier is a separate, optional phase
 ```text
 Browser ── Viser WebSocket ── fairino_viser_ui.py (Python)
                                  ├─ robot from /joint_states at 30 Hz (Pinocchio ViserVisualizer, same URDF as RoboPlan)
-                                 ├─ 6-DoF transform-controls gizmo on wrist3_link
+                                 ├─ 6-DoF transform-controls gizmo on the TCP (frame flange)
+                                 ├─ translucent plan preview robot
                                  ├─ Enable/Hold/Disable/Reset Target/Plan/Execute/Recover/Reset Fault/mode
                                  └─ status, speed, safety-speed and audit panels
         /fairino_servo/target_pose (PoseStamped, base_link)        /fairino_servo/* services
@@ -35,7 +36,7 @@ fairino_cartesian_servo (C++)
   ├─ joint-state validation (mapped by name, missing/NaN/Inf rejected, limits checked)
   ├─ target re-acquisition after every synchronization
   ├─ roboplan::SE3LowPassFilter → Cartesian linear/angular rate limiter
-  ├─ RoboPlan OInK FrameTask base_link→wrist3_link
+  ├─ RoboPlan OInK FrameTask base_link→flange
   │     PositionLimit + VelocityLimit + AccelerationLimit [+ SelfCollisionBarrier]
   ├─ joint-result validation, joint interpolation (only if solver < 1 kHz)
   ├─ fault catalog, recovery orchestration, audit events, diagnostics
@@ -279,7 +280,7 @@ Enable from plan mode:
    is still playing is refused). Then `DISABLED → SYNCING`; the hardware must
    report no fault and streaming `ARMED`.
 2. At the next loop cycle, from a joint sample at most 20 ms old: `q_command = q_measured`,
-   `target = FK(q_measured)` (base_link → wrist3_link), `filter.reset(target)`,
+   `target = FK(q_measured)` (base_link → flange), `filter.reset(target)`,
    rate-limiter state = target, previous OInK velocity = 0,
    `AccelerationLimit.reset()`. The reset pose is published to the UI.
 3. The servo publishes `q_command` (= measured) at 1 kHz.
@@ -329,14 +330,24 @@ discarded.
 | Viser world | URDF root = `base_link` (robot drawn at the origin) |
 | Gizmo | world pose → `base_link` through FK of `base_link` (identity here, kept general) |
 | `/fairino_servo/target_pose` | `base_link`; other frames are rejected |
-| OInK FrameTask | `base_link` → `wrist3_link` (flange, no tool offset) |
+| OInK FrameTask, gizmo, `target_pose`, planner pose goal | `base_link` → `flange` |
+| `flange` | fixed frame in `fairino20_v6.urdf`: `wrist3_link` + 120 mm along z, same orientation = TCP of FAIRINO tool 0 |
 | Joint commands/states in ROS | radians, j1..j6 |
 | ServoJ and CNDE joint values | degrees (converted in the plugin) |
 | FAIRINO global speed in CNDE | fraction 0..1 (shown ×100 as percent) |
 | FAIRINO joint speeds | deg/s |
 
-FAIRINO tool/workpiece frames (`tl_cur_pos` in mm/RPY) are not used; the servo
-works on the URDF kinematics only.
+The `flange` frame was measured against the controller: FAIRINO
+`GetForwardKin` for 12 random configurations agreed with URDF
+`wrist3_link · Translation(0, 0, 0.120 m)` within 0.02 mm and 0.001°, with
+identical base frames; live on SimMachine the servo reset pose and
+`tl_cur_pos` (tool 0) differ by 0.011 mm and 0.0004°. The URDF origin of
+`wrist3_link` is at the J6 joint, 120 mm behind the flange face, which is why
+the gizmo used to appear inside the wrist. FAIRINO tool/workpiece frames are
+not applied: the servo works on the URDF kinematics only. `RobotStatus`
+publishes `tool_number`, `flange_pose` and `tcp_pose` (FAIRINO convention: mm,
+rx/ry/rz about the fixed axes) so the UI can compare and warn when a FAIRINO
+tool other than 0 is active.
 
 ## 7. Limits applied by the servo
 
@@ -345,8 +356,8 @@ works on the URDF kinematics only.
 | Joint velocity (OInK `VelocityLimit`) | J1–J3 120 deg/s, J4–J6 180 deg/s (× `velocity_scale`, min with URDF) | FAIRINO FR20 specification |
 | Joint acceleration (OInK `AccelerationLimit`, then exact clamp) | 540 deg/s² | peak the controller itself planned for MoveJ at 100 % on SimMachine (541.7 deg/s²). ProxQP meets the bounds only to `eps_abs` = 1e-6 rad, which is ~1 rad/s² at 1 kHz (10.3 rad/s² measured); the result is clamped to the exact acceleration and velocity box before validation |
 | Joint position (OInK `PositionLimit`, gain 0.5) | URDF limits | FAIRINO URDF |
-| Cartesian rate limiter | 1.0 m/s, π rad/s | servo parameters |
-| SE3 filter | τ = 0.05 s | servo parameter |
+| Cartesian rate limiter (flange) | 2.0 m/s (FR20 TCP maximum), π rad/s | servo parameters |
+| SE3 filter | τ = 0.03 s | servo parameter |
 | Result validation | finite, inside limits, per-step ≤ v_max·dt | servo |
 | Tracking watchdog | \|q_command − q_measured\| ≤ 0.15 rad | servo parameter |
 | Braking ramp when leaving ACTIVE | last joint velocity → 0 at 540 deg/s² | servo |

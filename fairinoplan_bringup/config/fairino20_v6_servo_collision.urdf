@@ -462,4 +462,15 @@
       k_position="100.0"
       k_velocity="40.0" />
   </joint>
+  <!-- FAIRINO flange: the TCP of tool 0 as shown in the FAIRINO WebApp /
+       SimMachine. Measured against the controller's own forward kinematics
+       (GetForwardKin, 12 random configurations, SimMachine 3.9.9): 120 mm
+       along the wrist3_link z axis, same orientation, residual < 0.02 mm.
+       The servo, the planner and the Viser gizmo use this frame. -->
+  <link name="flange"/>
+  <joint name="flange_joint" type="fixed">
+    <origin xyz="0 0 0.12" rpy="0 0 0"/>
+    <parent link="wrist3_link"/>
+    <child link="flange"/>
+  </joint>
 </robot>
