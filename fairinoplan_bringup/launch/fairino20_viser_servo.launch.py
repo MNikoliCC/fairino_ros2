@@ -26,6 +26,8 @@ def generate_launch_description():
     use_mock_hardware = LaunchConfiguration("use_mock_hardware")
     controller_ip = LaunchConfiguration("controller_ip")
     allow_safety_config_writes = LaunchConfiguration("allow_safety_config_writes")
+    servoj_cmd_period = LaunchConfiguration("servoj_cmd_period")
+    servoj_max_queue = LaunchConfiguration("servoj_max_queue")
     auto_recovery = LaunchConfiguration("auto_recovery")
     solver_frequency = LaunchConfiguration("solver_frequency")
     self_collision_pairs = LaunchConfiguration("self_collision_pairs")
@@ -51,6 +53,10 @@ def generate_launch_description():
                     controller_ip,
                     " allow_safety_config_writes:=",
                     allow_safety_config_writes,
+                    " servoj_cmd_period:=",
+                    servoj_cmd_period,
+                    " servoj_max_queue:=",
+                    servoj_max_queue,
                 ]
             ),
             value_type=str,
@@ -87,6 +93,22 @@ def generate_launch_description():
                 "allow_safety_config_writes",
                 default_value="false",
                 description="SAFETY-RELATED: allow SetVelReducePara through /fairino_robot/set_safety_speed.",
+            ),
+            DeclareLaunchArgument(
+                "servoj_cmd_period",
+                default_value="0.001",
+                description=(
+                    "ServoJ cmdT [s] (time the controller takes for one point). 0.001 for the robot; "
+                    "0.002 for SimMachine, which executes fewer than 1000 points/s (see docs/servo_benchmark.md)."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "servoj_max_queue",
+                default_value="8",
+                description=(
+                    "ServoJ FIFO limit in points (flow control). SimMachine with servoj_cmd_period:=0.002: use 1 "
+                    "(measured: 4 left a hidden 0.55 s backlog in the SimMachine, 1 gives 36 ms like 1 ms/8)."
+                ),
             ),
             DeclareLaunchArgument(
                 "auto_recovery",

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <Eigen/Dense>
+#include <pinocchio/multibody/data.hpp>
 #include <pinocchio/spatial/se3.hpp>
 #include <rclcpp/rclcpp.hpp>
 
@@ -41,6 +42,7 @@
 #include <roboplan_oink/tasks/frame.hpp>
 
 #include "fairino_cartesian_servo/fault_catalog.hpp"
+#include "fairino_cartesian_servo/pointing_task.hpp"
 #include "fairino_cartesian_servo/servo_math.hpp"
 
 namespace fairino_cartesian_servo {
@@ -209,6 +211,11 @@ private:
   std::shared_ptr<roboplan::Scene> scene_;
   std::unique_ptr<roboplan::Oink> oink_;
   std::shared_ptr<roboplan::FrameTask> frame_task_;
+  // Free tool roll (point tracking): position + tool z direction only.
+  std::shared_ptr<PointingTask> pointing_task_;
+  std::atomic<bool> free_roll_requested_{false};
+  bool free_roll_active_ = false;  // real-time thread
+  std::unique_ptr<pinocchio::Data> fk_data_;  // real-time thread FK scratch
   std::shared_ptr<roboplan::AccelerationLimit> acceleration_limit_;
   std::vector<std::shared_ptr<roboplan::Task>> tasks_;
   std::vector<std::shared_ptr<roboplan::Constraints>> constraints_;

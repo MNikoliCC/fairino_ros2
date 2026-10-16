@@ -1,0 +1,300 @@
+# Trajectory recording, replay and path editor
+
+The Viser UI can record any motion of the robot, replay it, turn it into
+editable waypoints and plan new Cartesian paths drawn with the TCP gizmo.
+Every motion still goes through the same **plan → preview → Execute** flow as
+a normal plan: nothing moves the robot before the operator presses Execute in
+plan mode. There is no environment collision checking (self-collision, joint
+limits and reachability are checked).
+
+The design follows the FAIRINO Viser prototype (`MNikoliCC/fairino`:
+`trajectory_io.py`, `main.py`, `viser_two_point_line.py`) and adapts it to
+this stack:
+
+| Prototype | Here | Why |
+|---|---|---|
+| replay sends recorded TCP poses with `ServoCart` and the original timestamps | replay of the recorded **joints** through the planner: approach (RRT) + recorded motion, preview, Execute | no IK branch switches, same joint limits as every plan, nothing moves without preview |
+| MoveJ 20 % to the start without preview | approach planned and previewed | same rules as every motion |
+| recorded timing executed as recorded | recorded timing kept where it respects the joint limits, stretched only where it does not; or fastest timing within the limits | a measured motion can exceed the limits |
+| 5 ms XML-RPC polling | `/joint_states` (250 Hz), stored at 125 Hz | no extra load on the controller |
+| whole JSON rewritten after every sample | autosave at 2 Hz, file written on Stop (atomic replace) | performance, no half-written files |
+| one `runtime_trajectory.json` | one file per recording (name + time), library in the UI; `runtime_trajectory.json` stays as "latest" | recordings are kept |
+| absolute paths | `trajectory_dir` parameter / bind mount | works in Docker and on other computers |
+| path drawing tool: positions only, Bezier tangents, no saving, not executable | same drawing flow (green line from the last confirmed waypoint to the gizmo, confirm) starting at the robot TCP; waypoints with full TCP poses; the prototype's Bezier model (symmetric tangent handle at a waypoint, drawn as a cubic Bezier); time per segment (fastest shown, custom allowed); planned automatically while drawing; undo/redo, save/load; executed | the drawn path can be run |
+| recordings cannot be edited | **Edit as Path**: recording simplified to waypoints (Ramer–Douglas–Peucker), then edited | editable recordings |
+
+The file format stays compatible with the prototype (same keys; the Blender
+replay reads `samples[*].joint_positions` and `fbx_path`).
+
+## 1. Recording (tab *Record*)
+
+| Control | Effect |
+|---|---|
+| **Record** | arms the recorder; recording starts with the next motion of the robot (servoing or Execute) |
+| **Stop & Save** | ends the recording and writes `recordings/<name>_<YYYYmmdd_HHMMSS>.json` and `recordings/runtime_trajectory.json` |
+| **Discard** | drops the current recording |
+| Library: **Load** / **Unload** / **Refresh** | Load shows the recording's TCP trail (orange, a point every 2 mm of TCP travel) and makes it the one to replay or edit; Unload removes both; **Stop & Save** saves without loading. The autosave of the running recording (`runtime_trajectory.json`) is not listed |
+| Replay: *Timing*, *Speed [%]*, **Plan Replay** | plans approach + recorded motion; check the preview, then **Execute** |
+| Edit as path: *Simplify tolerance*, **Edit as Path** | converts the loaded recording into curve waypoints in the *Path* tab (details below); each segment keeps its recorded duration |
+
+How it records (`RecordingPanel` in `fairino_viser_trajectories.py`):
+
+- source: `/joint_states` (mapped by name), sampled at `record_rate_hz`
+  (125 Hz); the TCP pose is computed with the URDF frame `flange` (= TCP of
+  FAIRINO tool 0) and stored in the WebApp convention (mm, rx/ry/rz deg);
+- a motion is a joint speed above 0.5 deg/s; 0.25 s before the motion are
+  included (pre-roll) and the segment ends 0.5 s after the robot stopped, so
+  every segment starts and ends at rest;
+- pauses between segments are cut from the time axis (as in the prototype);
+  each segment carries the mode (`servo` or `planning`) it was recorded in;
+- autosave of `runtime_trajectory.json` at 2 Hz while recording.
+
+Sample: `{"t": s, "pose": [x, y, z mm, rx, ry, rz deg], "joint_positions": [rad × 6]}`.
+Extra file keys: `frame` (`flange`), `base_frame`, `pose_units`, `joint_units`,
+`fairino_tool_number`, `name`, `source`.
+
+### Replay
+
+*Recorded timing*: the measured samples are first cleaned
+(`smooth_recording`): repeated (stale) samples are removed and a
+least-squares cubic B-spline with knots every 40 ms is fitted per joint.
+`/joint_states` is stamped when the broadcaster publishes while the FAIRINO
+feedback frame behind it can be up to 4 ms older; differentiating the raw
+samples gave apparent accelerations above 100 rad/s² for a motion executed at
+9.4 rad/s². Then `fit_recorded_timing` keeps the recorded timing wherever the
+joint velocity and acceleration limits hold and stretches time only around the
+places where they do not (cosine-tapered window of ±0.12 s). On SimMachine the
+measured motion contains real short jerks (the simulator catching up after a
+stall: 125 rad/s² measured), which a uniform slowdown would have answered
+with ×5.2; locally it is ×1.12–1.19. *Speed [%]* plays back slower.
+
+*Fastest within limits*: same geometry, new time-optimal timing within the
+joint limits × speed scale; pauses inside the recording disappear.
+
+If the robot is not at the first recorded configuration (> 2 mrad), an
+approach is planned with RRT + TOPP-RA and prepended.
+
+### Edit as Path: recording → waypoints
+
+1. Ramer–Douglas–Peucker picks waypoints (position within *Simplify
+   tolerance*, default 3 mm, orientation within 2°).
+2. Every inner waypoint gets one symmetric tangent along the bisector of
+   its two chords, at most a third of the shorter chord, so uneven spacing
+   cannot make loops. Where the motion reverses (> 90°) the tangent is zero:
+   the robot stops there instead of overshooting the turning point.
+3. Every segment is compared with the recorded samples it replaces, both
+   ways (samples to curve, curve to the recorded polyline); a segment off by
+   more than the tolerance is split at the worst sample, until all segments
+   are within it.
+
+Measured on an 83.5 s recording (23 m, servo teaching): the earlier
+Catmull-Rom tangents gave 178 waypoints and up to 55 mm between path and
+recording; now 232 waypoints and at most 2.6 mm (2.8 s conversion). The
+executed robot motion stayed within 2.6 mm (mean 0.33 mm) of the recording.
+
+## 2. Path editor (tab *Path*)
+
+A path is a list of waypoints (full TCP poses: frame `flange` in
+`base_link`) and one segment between each pair of consecutive waypoints.
+
+The editor has two modes, shown as two check boxes in one row
+(**☑ Draw | ☐ Edit**; exactly one is ticked, *Draw* at start):
+
+- **Draw** — the TCP gizmo is visible; move it and press **Confirm
+  Waypoint**. Clicking an earlier waypoint sphere puts the TCP gizmo on that
+  waypoint; **Confirm Waypoint** then adds the segment back to it (to close a
+  loop or return to a point). Confirm without **New Path** starts the path at
+  the robot TCP and leaves the gizmo on the confirmed pose.
+- **Edit** — the TCP gizmo is hidden (it comes back in *Draw*, and it is always
+  shown while the servo is on, since the robot follows it). Clicking a
+  waypoint sphere (or picking it in *Waypoint*) selects it and shows a gizmo
+  to move/rotate that waypoint plus two small tangent handles toward the
+  previous and the next waypoint (only those that exist).
+
+| Control | Effect |
+|---|---|
+| **New Path** (top of the folder) | starts a path at the robot's current TCP (waypoint "start"), puts the TCP gizmo there and switches to *Draw* |
+| green line (Draw) | the next segment: from the last waypoint to the TCP gizmo; checked every 0.3 s while the gizmo moves and turns **red** when that pose cannot be reached from the last waypoint, before Confirm |
+| summary line | ✅ planned and executable · ❌ cannot be executed (reason on the next line) · ⏳ planning · ⚪ not planned yet; then waypoints, segments, curves, length and (when planned) the path time |
+| **Confirm Waypoint** | adds the TCP gizmo pose as the next waypoint (Draw only) |
+| Edit: **Undo** / **Redo** | edit history (100 steps) |
+| TCP gizmo rule | after **Undo**, **Redo** and **Delete Waypoint** the gizmo goes to the last waypoint (the end of the path), where drawing continues; after **Load** too, except in servo mode (a loaded path can end far from the robot). In servo mode the robot follows the gizmo |
+| Edit: **Clear** | removes the path **and the current plan** (planned path line, preview, plan in the planner) |
+| *Gizmo axes* **☐ base_link / ☑ tool** | the same setting as in the Control tab; both move and rotate, only the axes differ: `base_link` = the gizmo (TCP gizmo in Draw, waypoint gizmo in Edit) rests at the base axes, a ring turns the pose about that base axis and the gizmo returns to the base axes after release; `tool` = the pose's own axes. Hidden while point tracking is on (base_link axes, no rotation; a moved waypoint then turns toward the point) |
+| *Orientation* **Look at point** | turns the tool z axis of the TCP gizmo (Draw) or of the selected waypoint (Edit) toward the red point of *Control › Point tracking* (default −3000, 0, 0 mm), by the smallest rotation; also when tracking is off. The path is planned with the waypoints' own orientations (interpolated between them); files from the earlier "path looks at the point" version load with the orientations they had along that path |
+| **Plan while drawing** (on by default) | on: the trajectory is planned 0.4 s after every change and again when the robot comes to rest elsewhere (the preview robot follows the drawing); off: the plan and its preview are removed **at once**, then only a check runs (red segments, fastest times) |
+| **Plan Trajectory** | plans approach + path now (needed when *Plan while drawing* is off) |
+| *Waypoint* (or click its sphere) | selects a waypoint (switches to *Edit*) |
+| **Straight** | removes the curve of the selected waypoint |
+| **Delete Waypoint** | removes the selected waypoint (its two segments become one) |
+| *Segments* | one time field per segment, all at once (25 per page, *Show* picks the page for longer paths); each label gives the **fastest** possible time on one line (`2→3 ≥0.31s`, `❌` = cannot be executed, `…` = not checked yet; waypoints are numbered from 1); enter a longer time to slow the segment down, 0 = as fast as possible; a time below the fastest is listed and the fastest is used. Editing a field highlights that segment |
+| *Coordinates* (collapsed) | gizmo and selected-waypoint pose in `base_link` (mm, FAIRINO rx/ry/rz °), table of all waypoints; **Move [mm]** / **Rotate [deg]** + *Frame* (`base_link`, or `local` = the gizmo's / waypoint's own axes) + **Apply Offset** moves the TCP gizmo (Draw) or the selected waypoint (Edit) by exactly that amount |
+| Files: **Save** / **Load** / **Refresh** | `paths/<name>.json` (`format: fairino_path`, version 3; older files load as straight segments) |
+
+### Curves, as in the FAIRINO Viser prototype
+
+In *Edit*, a selected waypoint shows two tangent handles. On a straight
+waypoint they sit 35 % of the way toward the previous and the next waypoint
+(only as markers: the segments stay straight until a handle is dragged).
+As in the prototype, each handle gizmo is turned so that one of its axes
+lies on the line waypoint → handle, so dragging along that arrow only
+lengthens or shortens the tangent (re-aligned 0.6 s after a drag that
+changed the direction).
+Dragging one handle bends the path through the waypoint as a cubic Bezier;
+the other handle mirrors it (one symmetric tangent, as in the prototype), so
+the robot passes the waypoint without stopping. **Straight** removes the
+curve. The larger gizmo on the waypoint moves/rotates the waypoint itself
+(waypoints carry the tool orientation, which the prototype's points did
+not); its tangent handles move with it.
+
+Several waypoints at the same point (a path that returns somewhere) share one
+sphere; next to it, a short row of small numbered spheres (one per waypoint,
+4 cm apart, on the side where the waypoint gizmo has no handles) shows
+which they are without overlapping labels. Click one of them to pick that
+waypoint (Edit) or to put the gizmo on it (Draw); the *Waypoint* dropdown
+works too.
+
+Whatever is planned is checked: a segment that cannot be executed turns red
+and the summary says why (unreachable pose, configuration jump/singularity,
+joint limit, self-collision). After an edit, a plan made earlier is removed
+when *Plan while drawing* is off, so Execute never runs a plan that no longer
+matches the drawing. The plan, its preview and the only **Execute** button
+are in the *Control* tab.
+
+Colours: green = path segments and the segment being drawn, red = a segment
+(or the segment being drawn) that cannot be executed, yellow = selected
+segment/waypoint, cyan = tangent handles, blue (thin) = the planned TCP
+trajectory including the approach (the move from where the robot is to the
+start of the path; drawn from the planned trajectory every ~2 mm of TCP
+travel, so it shows the curves exactly as the preview robot moves).
+
+Teaching workflow: **Enable Servo**, **New Path**, drive the robot with the
+gizmo and press **Confirm Waypoint** at each pose; **Disable Servo**; check
+the preview; **Execute** (Control tab). In plan mode the gizmo stays where it
+was put; *Reset Target to Current TCP* brings it back to the robot.
+
+### Stops and curves
+
+Where two straight segments meet with a change of direction (> 1°) the robot
+stops at the waypoint; collinear straight segments and curve waypoints are
+passed without stopping. A segment is a cubic Bezier when at least one of its
+waypoints is a curve waypoint: control points = start + its tangent and
+end − its tangent (zero for a non-curve end), drawn with
+`add_spline_cubic_bezier` exactly as it is planned. Orientation is interpolated with slerp along every
+segment with a smoothstep profile (zero angular rate at the segment ends).
+
+### Time per segment
+
+The planner computes the time-optimal timing (joint velocity and
+acceleration limits, curvature, stops, TCP at most 2 m/s) and reports the
+fastest time of every segment; segments with a longer requested time are
+slowed down by capping their speed (bisection) until they take that long.
+Neighbouring segments joined without a stop can change slightly because the
+robot accelerates or brakes across the waypoint. A requested time shorter
+than the fastest is ignored (the UI says so).
+
+## 3. Planning (planner, `/fairinoplan/path_goal`)
+
+The UI publishes a JSON request (`std_msgs/String`) on
+`/fairinoplan/path_goal`; the planner answers on `/fairinoplan/status` and
+`/fairinoplan/planned_path` like for any plan.
+
+```json
+{"type": "cartesian_path", "name": "path",
+ "waypoints": [{"position_m": [x, y, z], "wxyz": [w, x, y, z], "curve": false, "tangent_m": [0, 0, 0]}, …],
+ "segments": [{"duration_s": null}, {"duration_s": 2.5}, …],
+ "look_at_m": null}                      or [x, y, z] in base_link: the tool z axis looks at that point
+
+{"type": "clear"}   removes the plan (empty planned_path, status "ready")
+
+/fairinoplan/path_check (same waypoints/segments + "request_id") → /fairinoplan/path_check_result:
+{"request_id", "ok", "message", "segment_fastest_s": […], "failed_segments": […]}   (no plan is made)
+```
+
+Cartesian path:
+
+1. `sample_path`: samples every 2 mm (orientation counted as 0.2 m/rad), with
+   per-sample speed limit and stop flags (start, end, waypoints with a change
+   of direction).
+2. IK: the first pose with damped least squares from the current
+   configuration (RoboPlan SimpleIk as fallback), then continuous damped
+   least-squares IK seeded by the previous sample (`PathIk.follow`). An
+   unreachable sample or a joint jump > 0.25 rad between samples (singularity,
+   configuration change) fails with the segment index; the UI draws it red.
+3. Joint limits for every sample, self-collision every 5th sample.
+4. Timing (`parameterize_path`): velocity limit curve from the TCP maximum,
+   the joint velocity limits and the curvature term, forward/backward
+   acceleration passes, cubic spline; where the spline still exceeds a joint
+   limit, only that region is slowed down (local iterations); requested
+   segment times by capping the segment speed; a uniform slowdown is the last
+   fallback. The status carries `segment_fastest_s` and `segment_planned_s`.
+5. Approach from the current configuration with RRT + TOPP-RA when needed;
+   approach + path are published as one trajectory (4 ms samples, the
+   trajectory controller interpolates at 1 kHz).
+
+Every new request clears the previous plan, so Execute can never send a stale
+plan, and Execute is refused when the robot is more than 3 mrad away from
+the first point of the plan ("the robot moved since this plan was made").
+Execute sends the trajectory with a zero header stamp ("start now"); the
+published plan keeps the planning time for the UI.
+
+### Tracking report
+
+During every Execute the planner records `/joint_states` and the ServoJ
+counters of `/fairino_robot/status`. When the controller reports success it
+waits until the robot is at the last point (at most 2 s), then publishes
+*succeeded* with `tracking`:
+
+| Field | Meaning |
+|---|---|
+| `max_deviation_mm`, `mean_deviation_mm`, `p95_deviation_mm` | distance of every measured TCP position to the planned TCP path (spatial: a robot that is late but on the path counts 0) |
+| `worst_at_s` | time of the largest distance after the start of the motion |
+| `executed_s`, `planned_s` | first to last motion of the robot vs. the plan |
+| `arrival_after_controller_s` | how long after the controller finished the robot reached the last point |
+| `servoj_min_rate`, `servoj_mean_rate`, `servoj_expected_rate` | executed ServoJ points/s (lowest over 0.5 s windows, mean) and 1/cmdT |
+| `servoj_limited_points`, `servoj_flow_skips` | points shortened by the per-point step limit / cycles skipped by flow control during the execution |
+
+The UI shows it under **Execute** (and the largest distance in the Path
+tab); above 5 mm with a ServoJ rate below 95 % of 1/cmdT it names that as the
+reason (see [servo_benchmark.md](servo_benchmark.md) §7).
+
+## 4. Files and directories
+
+`<trajectory_dir>/recordings/*.json` and `<trajectory_dir>/paths/*.json`.
+`trajectory_dir` (UI parameter) defaults to `$FAIRINO_TRAJECTORY_DIR`, then
+`/ros2_ws/trajectories`, which `docker/compose.yaml` bind-mounts from
+`fairino_ros2/trajectories` on the host, then `~/.ros/fairino_trajectories`
+inside the container. The bind mount becomes active when the container is
+recreated (`docker compose up -d`); until then files are written to
+`~/.ros/fairino_trajectories` in the container.
+
+## 5. Measured (SimMachine 3.9.9, 2026-10-15)
+
+| Test | Result |
+|---|---|
+| Cartesian path (earlier version with corner blending, since removed from the editor): 5 waypoints, blend 50 mm, sharp corner with 0.6 rad reorientation, smooth Bezier waypoint, 0.3/0.4 m/s | check + plan 0.09–0.12 s; approach 0.29 s + path 3.68 s; executed, TCP max 1.5 mm (mean 0.5 mm) from the designed path; TCP speed in the planned trajectory ≤ 0.400 m/s; 0.28 m/s through the blend, 0.13 m/s through the smooth waypoint, stop (0.009 m/s) at the sharp corner; closest approach to the blended waypoint 17.7 mm (r = 50 mm); no FAIRINO code |
+| same path before local slowdown and orientation smoothstep | 5.81 s (uniform slowdown ×1.64), 0.01 m/s at the smooth waypoint |
+| Recording through the UI: 3 planned moves | 505 samples, 4.1 s, 3 segments (planning) |
+| Replay, recorded timing | 4.63 s (×1.12 local stretch); executed, max 0.23° (mean 0.03°) from the recorded joint path, end pose identical |
+| Replay, fastest within limits, 100 % / 50 % | 2.91 s / 4.37 s; 0.24–3.2° / 0.17° from the recorded path (the 3.2° once, while SimMachine lagged: 399 point-limited ServoJ points) |
+| Edit as Path → Plan Path → Execute (earlier version: blend corners) | 21 waypoints (2044 mm); reachable; approach 0.56 s + 9.42 s; executed, ended at the recorded end pose |
+| Path analysis (earlier version with per-segment speeds), 3 straight segments near home | 0.07 s; max feasible 1555 / 1311 / 1134 mm/s; with a waypoint 2.5 m away: segment 2 → 3 red ("pose not reachable at 18 %"), Plan Path names the same segment |
+| Plan + Execute with every segment at its max feasible speed (earlier version) | planned without slowdown (joint velocity 0.85, acceleration 0.94 of the limits), peak 1014 mm/s (short segments), executed, no FAIRINO code |
+| Draw flow through the UI (earlier version) | New Path → robot moved, *Reset Target*, Confirm ×2 → 3 waypoints, 2 segments, max feasible 268 mm/s on segment 2 → 3; Bezier on → 280 mm/s; Plan Path (0.54 s approach + 2.72 s); Execute from *Control*: succeeded |
+| Editor buttons (headless Chrome, earlier version) | Clear, add at robot ×2, Undo, Redo, Save, Load: as documented |
+| Plan mode regression (joint and Cartesian goals) | 7/7 succeed, no FAIRINO code |
+| Path v3 (planner): 4 waypoints, two curve waypoints | fastest 0.432 / 0.399 / 0.592 s, planned in 0.09 s; requested 3.0 s and 2 × fastest: planned 0.497 / 3.000 / 1.184 s (0.20 s); executed in 4.71 s (planned 4.68 s), no FAIRINO code |
+| Execute after the robot moved / after clear | refused ("the robot moved since this plan was made"; "No planned trajectory.") |
+| Path v3 through the UI | New Path, Confirm ×2: planned automatically (1.25 s + 0.47 s approach); curve at waypoint 2: 1.15 s; time 2.5 s on segment 2 → 3: planned 2.50 s (fastest 0.60 s); Execute from *Control*; Clear removed path, planned path line and preview, planner "plan cleared" |
+| Path v3 with prototype curves (UI, after a host reboot) | New Path moved the gizmo to the robot; Confirm ×2 planned while drawing (1.07 s + 0.47 s); curve file loaded and planned (0.94 s), executed, approach planned again by itself; Straight → 1.00 s; *Plan while drawing* off + Undo → check only (fastest 0.43 s, no plan); Plan Trajectory → planned; Execute → "executed — press Plan Trajectory to run it again"; Clear → plan cleared |
+| Editor with Draw/Edit modes (UI) | Apply Offset +3000 mm on the gizmo → draft line red and "cannot be reached" before Confirm; −2800 mm → green again; Confirm → planned; offsets +250 mm y and −250 mm z, Confirm ×2 → planned 1.01 s while drawing; picking waypoint 2 → Edit, TCP gizmo hidden, waypoint gizmo + two tangent handles shown; *Plan while drawing* off → "plan cleared" immediately; Plan Trajectory reports an unreachable segment |
+| Edit as Path, new conversion, executed at the fastest timing (83.5 s recording) | 232 waypoints, path within 2.6 mm of the recording; plan 35.8 s; executed within 0.84 mm of the plan (ServoJ 2 ms / queue 1) and within 2.6 mm (mean 0.33 mm) of the recording |
+| Path with point tracking (UI, first version) | 4 waypoints, point 0.5 m below the start and offset; planned 2.01 s + approach 0.35 s (the tool first turns to the point); every planned sample within 0.000° of the point, at most 0.38° rotation between 4 ms points; executed within 0.5 mm of the plan; file stores `look_at_m` |
+| Unit tests `test/test_trajectory_tools.py` | 19/19 |
+
+Not tested yet: dragging the waypoint gizmo and the tangent handles, and
+clicking waypoint spheres in the 3D view (Draw: back to a waypoint; Edit:
+select / cycle through a shared point), because Three.js handles cannot be
+driven from the headless test; the code path behind them (waypoint
+pose/tangent update, append, redraw) is the same as for the buttons and
+dropdowns.

@@ -36,7 +36,7 @@ fairino_cartesian_servo (C++)
   ├─ joint-state validation (mapped by name, missing/NaN/Inf rejected, limits checked)
   ├─ target re-acquisition after every synchronization
   ├─ roboplan::SE3LowPassFilter → Cartesian linear/angular rate limiter
-  ├─ RoboPlan OInK FrameTask base_link→flange
+  ├─ RoboPlan OInK FrameTask base_link→flange (PointingTask with a free tool roll)
   │     PositionLimit + VelocityLimit + AccelerationLimit [+ SelfCollisionBarrier]
   ├─ joint-result validation, joint interpolation (only if solver < 1 kHz)
   ├─ fault catalog, recovery orchestration, audit events, diagnostics
@@ -55,6 +55,10 @@ FairinoHardwareInterface (ros2_control, 1 kHz)
 FAIRINO SimMachine 3.9.9 (192.168.58.2) / FR20 controller
 
 fairino_plan_execute.py (plan mode): SimpleIk + RRT + shortcutting + TOPP-RA → FollowJointTrajectory
+  + ~/path_goal: recorded joint paths and Cartesian paths (path IK, limits,
+    self-collision, timing) with an RRT approach, same preview/Execute
+fairino_viser_trajectories.py (in the UI process): recording from /joint_states, library,
+  replay requests, path editor; fairino_trajectory_tools.py: geometry, IK, timing, files
 ```
 
 ### 1.1 Single owner of the FAIRINO SDK
@@ -140,7 +144,11 @@ In `ARMED`, every cycle applies, in this order:
    `point_velocity_factor (1) × v_max × cmdT`. After a skipped cycle or a
    controller stall the robot lags briefly and catches up instead of receiving
    one large step (which produced `main=1 sub=23` speed faults on SimMachine).
-4. `ServoJ(cmd, cmdT = 0.001, UDP)`; any non-zero return code disarms.
+4. `ServoJ(cmd, cmdT, UDP)` with `cmdT = servoj_cmd_period` (0.001 s on the
+   robot, 0.002 s on SimMachine); any non-zero return code disarms.
+   Effective joint speed limit = executed points/s × cmdT × v_max: a
+   controller that executes fewer than 1/cmdT points per second caps the
+   speed (SimMachine at 500 points/s with cmdT 1 ms: 50 %).
 
 `read()` disarms on any controller main/sub code, E-stop, safety stop, safety
 door/plane, safety data, driver alarm/error, driver communication error,
@@ -216,7 +224,7 @@ system on the same host (a foreign `/viser_visualizer` node appeared on domain
 | Joint interpolation | 1 kHz | only used when `solver_frequency` < 1 kHz (250 Hz option) |
 | Joint command output | 1 kHz | `/fairino_servo_controller/commands` |
 | ros2_control | 1 kHz | `controller_manager.update_rate` |
-| ServoJ | ≤ 1 kHz, UDP, `cmdT = 0.001 s` | flow control matches the controller's consumption |
+| ServoJ | ≤ 1 kHz, UDP, `cmdT = 0.001 s` (SimMachine 0.002 s) | flow control matches the controller's consumption |
 | FAIRINO feedback (CNDE) | 250 Hz | SDK minimum period 4 ms |
 | `/joint_states` | 250 Hz | broadcaster `update_rate` = feedback rate |
 | `/fairino_robot/status` | 50 Hz | |
@@ -234,6 +242,7 @@ and OInK keep tracking the last valid target.
 | `/joint_states` | `sensor_msgs/JointState` | broadcaster → servo, UI, planner. Order is j1,j2,j4,j5,j3,j6: always mapped by name |
 | `/fairino_servo/target_pose` | `geometry_msgs/PoseStamped` in `base_link` | UI (or benchmark) → servo |
 | `/fairino_servo/reset_target_pose` | `PoseStamped`, latched | servo → UI (gizmo jumps to the synchronized TCP) |
+| `/fairino_servo/set_free_tool_roll` | service `std_srvs/SetBool` | UI (point tracking) → servo: `true` = track only the position and the tool z axis (roll free), `false` = full pose; effective in the next cycle in any state, audited, reported as `free_tool_roll` in `/fairino_servo/status`. The UI enables point tracking only after the servo confirms; it requests `false` once when it starts and re-requests `true` if the servo restarted while tracking is on (it never forces `false`, so other clients such as the benchmark can use the mode) |
 | `/fairino_servo_controller/commands` | `std_msgs/Float64MultiArray` j1..j6 [rad] | servo → JointGroupPositionController |
 | `/fairino_servo/status` | `fairino_msgs/ServoStatus` | servo → UI |
 | `/fairino_servo/diagnostics` | `diagnostic_msgs/DiagnosticArray` | servo |
@@ -241,6 +250,8 @@ and OInK keep tracking the last valid target.
 | `/fairino_robot/status` | `fairino_msgs/RobotStatus` | hardware plugin → servo, UI |
 | `/fairino_robot/events` | `fairino_msgs/AuditEvent`, latched 200 | hardware plugin → UI |
 | `/fairinoplan/pose_goal`, `/fairinoplan/joint_goal` | `PoseStamped` / `JointState` | UI → planner |
+| `/fairinoplan/path_goal` | `std_msgs/String` (JSON: `joint_path` or `cartesian_path`) | UI → planner ([trajectory_recording_and_paths.md](trajectory_recording_and_paths.md)) |
+| `/fairinoplan/path_check` → `/fairinoplan/path_check_result` | `std_msgs/String` (JSON) | UI ↔ planner: reachability and fastest time per segment while drawing; no plan is made |
 | `/fairinoplan/status` | `std_msgs/String` (JSON), latched | planner → UI |
 | `/fairinoplan/planned_path` | `trajectory_msgs/JointTrajectory`, latched | planner → UI (drawn in Viser) |
 
@@ -260,7 +271,7 @@ and OInK keep tracking the last valid target.
 | `/fairino_robot/stop` | `Trigger` | disarm, `ServoMoveEnd(1)`, `StopMotion()` |
 | `/fairino_robot/set_global_speed` | `fairino_msgs/SetGlobalSpeed` | `SetSpeed`/`SetSpeedInstant`, confirmation, read-back, audit |
 | `/fairino_robot/set_safety_speed` | `fairino_msgs/SetSafetySpeed` | `SetVelReducePara`, refused unless `allow_safety_config_writes` |
-| `/fairinoplan/execute` | `Trigger` | execute the last plan on `fairino20_controller` |
+| `/fairinoplan/execute` | `Trigger` | execute the last plan on `fairino20_controller` (sent with a zero stamp = start on receipt; refused when the robot is not at the plan's first point; every new request clears the previous plan) |
 
 ## 5. Controller switching
 
@@ -363,6 +374,31 @@ tool other than 0 is active.
 | Braking ramp when leaving ACTIVE | last joint velocity → 0 at 540 deg/s² | servo |
 
 These are software limits on the generated command, not FAIRINO safety limits.
+
+### Free tool roll (point tracking)
+
+With the free tool roll on (`/fairino_servo/set_free_tool_roll` = `true`) the servo replaces the OInK
+`FrameTask` by `PointingTask` ([pointing_task.cpp](../fairino_cartesian_servo/src/pointing_task.cpp)):
+
+- error rows: position (as `FrameTask`) and the smallest rotation that turns
+  the tool z axis onto the target's z axis, expressed in the tool frame;
+  Jacobian rows rotated the same way; weight `diag(√pc·I3, √oc, √oc, 0)`, so
+  the rotation about the tool z axis has no cost;
+- on the FR20 that rotation is exactly joint 6: OInK leaves j6 where it is
+  (regularization) unless the joint limits or the other joints need it, and
+  never asks for a roll beyond a joint limit. (Earlier the UI chose the roll
+  and could drive j6 into its limit: OInK "QP solver reached the maximum
+  number of iterations", FAULT → LOCKOUT.)
+- each new target in this mode gets the roll of the current command
+  (`alignToolAxis`: same z axis, smallest rotation), so the filter, the rate
+  limiter, the re-acquisition check and a later switch back to the full pose
+  all see the robot's own roll (no roll transient);
+- the switch takes effect in the next cycle without allocation (the task
+  pointer in the task list is replaced); constraints, the acceleration limit
+  and the self-collision barrier are unchanged.
+
+Measured cost: OInK mean 0.052–0.055 ms, max ≤ 0.137 ms (full pose 0.055–0.059
+/ ≤ 0.204 ms); see [servo_benchmark.md](servo_benchmark.md) §8.
 
 ## 8. Self-collision barrier (phase 2)
 

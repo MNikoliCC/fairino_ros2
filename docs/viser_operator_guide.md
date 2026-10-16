@@ -20,8 +20,11 @@ docker compose exec ros2 bash      # sourced ROS 2 shell (ROS_DOMAIN_ID=42)
 Inside the container:
 
 ```bash
-# FAIRINO hardware: SimMachine or a real controller at 192.168.58.2
+# Real FAIRINO controller at 192.168.58.2
 ros2 launch fairinoplan_bringup fairino20_viser_servo.launch.py use_mock_hardware:=false
+
+# SimMachine: 2 ms ServoJ points (it executes fewer than 1000 points/s)
+ros2 launch fairinoplan_bringup fairino20_viser_servo.launch.py use_mock_hardware:=false servoj_cmd_period:=0.002 servoj_max_queue:=1
 
 # Mock hardware (no FAIRINO controller)
 ros2 launch fairinoplan_bringup fairino20_viser_servo.launch.py use_mock_hardware:=true
@@ -33,6 +36,8 @@ Launch arguments:
 |---|---|---|
 | `use_mock_hardware` | `true` | `false` loads the FAIRINO hardware plugin |
 | `controller_ip` | `192.168.58.2` | FAIRINO controller address |
+| `servoj_cmd_period` | `0.001` | ServoJ cmdT [s]: time the controller takes for one point. `0.002` for SimMachine |
+| `servoj_max_queue` | `8` | ServoJ FIFO limit [points]; `1` together with `servoj_cmd_period:=0.002` |
 | `auto_recovery` | `true` | automatic recovery of whitelisted faults (never ends in motion: HOLD in servo mode, DISABLED in plan mode) |
 | `solver_frequency` | `1000.0` | OInK rate; `250.0` enables 1 kHz interpolation |
 | `self_collision_pairs` | `0` | self-collision barrier (phase 2), up to 5 pairs |
@@ -67,12 +72,24 @@ FAIRINO TCP (`tl_cur_pos`, mm and rx/ry/rz in deg) and their difference
 (0.01 mm on SimMachine). With a FAIRINO tool other than 0 the gizmo stays on
 the flange and the Status tab says so.
 
-The panel has a summary line (state · mode · active controller · FAIRINO
-connection · reason) and four tabs:
+The `base_link` axes (25 cm, labelled) mark the frame of every pose and
+offset in the UI. Bottom left: the browser's frame rate and the longest
+frame of the last second (`60 fps · max frame 20 ms`), measured in the page;
+a low value means the browser/GPU is slow, it does not affect the robot.
+
+The panel starts with the state (coloured: 🔵 DISABLED, 🟢 ACTIVE, 🟡 HOLD,
+🟠 FAULT, 🔴 LOCKOUT) · mode · active controller · FAIRINO connection · reason,
+then the *Last command* line and six tabs. The **Planned motion** box with
+the only **Execute** button is in the *Control* tab, below *Plan* and above
+*Fault*; it shows the plan waiting for Execute from any source (Plan, Home,
+a replay from *Record*, a path from *Path*): state, duration, approach,
+slowdown and the preview controls.
 
 | Tab | Content |
 |---|---|
-| **Control** | mode selector, servo buttons, Plan/Execute, fault box with Recover/Reset Fault, last command result |
+| **Control** | Point tracking (Enable/Disable Point Tracking, point in `base_link`), servo buttons (Enable/Disable Servo, Servo Hold/Resume Servo, Reset Target), Plan and Home, Planned motion with **Execute**, fault box with Recover |
+| **Record** | recording, library, replay, Edit as Path ([trajectory_recording_and_paths.md](trajectory_recording_and_paths.md)) |
+| **Path** | Cartesian path editor: draw from the robot TCP with Confirm Waypoint, curve waypoints (Bezier), time per segment (fastest shown), automatic planning, files |
 | **Status** | servo state, active controller, fault, suggested action, joint feedback age/rate, Viser target age, tracking error, recovery attempts and result, rates and scheduling, FAIRINO connection, enabled, manual/automatic mode, main/sub code, E-stop, safety stops, collision and collision levels, safety door/plane/data, driver alarms, soft limit/abnormal stop, UDP state, ServoJ streaming, last ServoJ code and counters, feedback age/rate, `write()` period; timing table (mean/p99/max/overruns) |
 | **Speed** | global speed (manual/automatic), Apply Global Speed with confirmation, the four speed layers, the safety-speed form (SimMachine only) |
 | **Audit** | newest 25 audit events of the servo and the hardware |
@@ -82,10 +99,11 @@ services check again and answer with a reason in *Last command*.
 
 ## 3. Servo mode
 
-The *Servo* folder has three buttons: **Enable Servo** (servo mode, tracking
-the gizmo), **Servo Hold** (servo mode, not tracking) and **Plan Mode** (leave
-servoing; the trajectory controller holds the robot). There is no separate
-mode switch.
+The *Servo* folder has one button that toggles **Enable Servo** (servo mode,
+tracking the gizmo) / **Disable Servo** (leave servoing; this is plan mode:
+the trajectory controller holds the robot), and one that toggles **Servo
+Hold** (servo mode, not tracking) / **Resume Servo**. Each button shows the
+action it will perform. There is no separate mode switch.
 
 1. **Enable Servo** from plan mode: the robot must be at rest (Enable is refused while a
    planned trajectory is still executing). The servo copies the measured joints
@@ -105,22 +123,58 @@ After every enable, resume or recovery the servo ignores the gizmo until it
 reports a pose within 1 cm / 0.1 rad of the reset pose. The UI does this
 automatically; it prevents an old gizmo position from pulling the robot.
 
-## 4. Servo Hold, resume, Plan Mode
+### Point tracking and gizmo axes
+
+*Control › Point tracking* (above *Servo*): **Enable Point Tracking** /
+**Disable Point Tracking** (one button). While it is on, you move the TCP
+with the gizmo as usual and the tool z axis keeps pointing at the point.
+
+- There is one point (red sphere, shown while tracking is on), set only by
+  *Point [mm]* in `base_link`; default −3000, 0, 0 mm. *Path › Orient to
+  point* uses the same point, also when tracking is off.
+- While servoing, the target turns toward the point at most 45°/s (switching
+  tracking on, or typing a point far away, does not swing the robot round at
+  once; measured: 63° in 1.5 s).
+- The rotation about the tool axis is free: the servo tracks only the
+  position and the direction of the tool axis (service `set_free_tool_roll`; the Status tab shows *Orientation task*), and OInK
+  picks that rotation (on the FR20 joint 6) with the least motion and within
+  the joint limits; j6 keeps its full range. (The FAIRINO Viser prototype
+  computed the roll from a fixed "up" vector and made it jump by up to 180°;
+  an earlier version here let the UI choose the roll, which could run j6 into
+  its limit.) Measured: the point circled the tool 3 times, j6 stayed at 0.0°,
+  the tool axis on the point within 0.0°.
+- Switching it off: in plan mode (the robot did not turn) the target goes back
+  to the robot's tool orientation; while servoing it keeps the orientation the
+  robot has reached. Switching the gizmo axes never changes the orientation;
+  only *Look at point* and point tracking turn it toward the point.
+
+**Gizmo axes** (*Control › Servo* and *Path*, one setting): **☐ base_link /
+☑ tool**. Both move and rotate; only the axes differ. `tool`: the gizmo is the
+target pose (its arrows and rings are the tool axes). `base_link`: the gizmo
+rests at the base axes; moving it moves the target, turning a ring turns the
+target about that base axis, and after release the gizmo returns to the base
+axes while small axes at the target show its orientation. The same applies to
+the waypoint gizmo in the Path tab's Edit mode. While point tracking is on the
+gizmo always uses `base_link` axes without rotation (the point decides) and
+the choice is hidden.
+
+## 4. Servo Hold, resume, Disable Servo
 
 | Button | Effect |
 |---|---|
 | **Servo Hold** | ACTIVE → HOLD: no further target tracking; the joints decelerate at the acceleration limit (540 deg/s², at most ≈ 0.35 s from full speed) and then hold |
-| **Enable Servo** in HOLD | resume (after the deceleration has finished): target reset to the current TCP, then ACTIVE |
+| **Resume Servo** (in HOLD) | resume (after the deceleration has finished): target reset to the current TCP, then ACTIVE |
 | **Reset Target to Current TCP** | moves the gizmo and the servo reference to the current TCP (useful after dragging the gizmo far away). While ACTIVE and moving, the robot decelerates at the acceleration limit towards that point instead of stopping abruptly; refused while synchronizing or recovering |
-| **Plan Mode** | ACTIVE → HOLD, wait for standstill, switch back to the trajectory controller (plan mode, state DISABLED). From FAULT/LOCKOUT the controller is switched but the fault state remains |
+| **Disable Servo** | ACTIVE → HOLD, wait for standstill, switch back to the trajectory controller (plan mode, state DISABLED). From FAULT/LOCKOUT the controller is switched but the fault state remains |
 
 ## 5. Plan mode (RRT + TOPP-RA)
 
 1. Make sure the summary shows `DISABLED · mode plan · controller fairino20_controller`
-   (press **Plan Mode** if the servo is active).
+   (press **Disable Servo** if the servo is active).
 2. Move the gizmo to the goal pose, or press **Home** instead of Plan:
    it plans to the home joint pose (UI parameter `home_joints_deg`, default
-   0, −90, 90, −90, −90, 0 deg) through the same pipeline.
+   0, −90, 90, −90, −90, 0 deg: tool pointing down) through the same
+   pipeline.
 3. **Plan**: the planner solves IK from the measured state, plans with RRT,
    shortcuts and time-parameterizes with TOPP-RA (FR20 velocity limits,
    540 deg/s²). The planned TCP path is drawn in blue; the planner status
@@ -136,6 +190,48 @@ automatically; it prevents an old gizmo position from pulling the robot.
 
 Plan and Execute are disabled in servo mode. The planner checks robot
 self-collisions; there is no environment model.
+
+## 5a. Recording, replay and path editor
+
+Short form; details, file format and measurements in
+[trajectory_recording_and_paths.md](trajectory_recording_and_paths.md).
+
+- **Record** tab: **Record** arms the recorder, it starts with the next motion
+  (servoing or Execute) and pauses while the robot is at rest; **Stop & Save**
+  writes the file. Load a recording, choose *Recorded timing* or *Fastest
+  within limits* and a speed, **Plan Replay**, check the preview, **Execute**.
+  **Edit as Path** turns it into waypoints.
+- **Path** tab, *Draw* mode: **New Path** starts at the robot's TCP and puts
+  the gizmo there. Move the TCP gizmo (in servo mode the robot follows it);
+  the green line shows the next segment and turns red as soon as the
+  pose is out of reach; **Confirm Waypoint** fixes it. Clicking an earlier
+  waypoint puts the gizmo on it; Confirm adds the segment back to it. After
+  Undo/Redo/Delete Waypoint the gizmo goes to the end of the path.
+- *Edit* mode (☑ Edit next to ☐ Draw, or pick a waypoint): the TCP gizmo disappears; a clicked
+  waypoint shows a gizmo to move/rotate it and two small tangent handles
+  (toward the previous/next waypoint); drag a handle to bend the path through
+  the waypoint, **Straight** removes the curve. *Gizmo axes* switches the
+  gizmo between `base_link` axes (move only) and the pose's own orientation
+  (move and rotate); **Orient to point** turns the TCP gizmo (Draw) or the
+  selected waypoint (Edit) toward the red tracking point; with point
+  tracking on, a moved waypoint turns toward it by itself. Waypoints are
+  numbered from 1. Waypoints at the same point
+  get small numbered spheres next to it; click the one you want.
+  Selected segment/waypoint: yellow. Summary icon: ✅ planned, ❌ cannot be
+  executed, ⏳ planning, ⚪ not planned. Select a segment to see its **fastest time** and enter
+  a longer *Time [s]* if wanted. With **Plan while drawing** the trajectory is
+  planned after every change (untick it to remove the plan and only check,
+  then press **Plan Trajectory**); a segment that cannot be executed turns
+  red. The collapsed *Coordinates* folder shows poses in `base_link` and moves
+  the gizmo or the selected waypoint by an exact offset. Check the preview
+  and press **Execute** in *Control*. **Clear** removes the path and the plan.
+- After every **Execute**, *Planned motion* (Control tab) shows one line:
+  largest and mean distance of the measured TCP from the planned path, the
+  executed vs. planned time and the lowest ServoJ rate the controller kept
+  up with; above 5 mm a ⚠️ line says how far and why (e.g. the SimMachine
+  executed fewer ServoJ points than needed). The Path tab repeats the
+  largest distance after a path run. The *Status* tab shows the ServoJ
+  points/s the controller executes right now.
 
 ## 6. Faults and recovery
 
@@ -179,7 +275,7 @@ ros2 control list_hardware_components          # FairinoSystem state
 ros2 control set_hardware_component_state FairinoSystem active
 ```
 
-then **Recover** and **Plan Mode** to return to plan mode.
+then **Recover** and **Disable Servo** to return to plan mode.
 
 ## 7. Speed panel
 
@@ -211,6 +307,6 @@ then **Recover** and **Plan Mode** to return to plan mode.
 
 ## 9. Stop
 
-Press **Plan Mode**, then stop the launch with `Ctrl+C`. The hardware
+Press **Disable Servo**, then stop the launch with `Ctrl+C`. The hardware
 plugin ends servo mode (`ServoMoveEnd`, `StopMotion`) and closes the SDK
 connection on shutdown. Stop the containers with `./simmachine.sh down`.

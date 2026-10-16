@@ -28,7 +28,8 @@ publishes port 8000 (Viser) and may use real-time scheduling (`SYS_NICE`,
 
 ```bash
 docker compose exec ros2 bash
-ros2 launch fairinoplan_bringup fairino20_viser_servo.launch.py use_mock_hardware:=false
+# SimMachine; on the real robot leave out the two servoj_* arguments
+ros2 launch fairinoplan_bringup fairino20_viser_servo.launch.py use_mock_hardware:=false servoj_cmd_period:=0.002 servoj_max_queue:=1
 ```
 
 Then open <http://localhost:8000>. See [docs/README.md](docs/README.md) for the

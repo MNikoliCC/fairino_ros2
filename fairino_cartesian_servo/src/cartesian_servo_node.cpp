@@ -289,6 +289,8 @@ void CartesianServoNode::buildModel() {
   task_options.task_gain = task_gain_;
   task_options.lm_damping = lm_damping_;
   frame_task_ = std::make_shared<roboplan::FrameTask>(*oink_, *scene_, goal, task_options);
+  pointing_task_ = std::make_shared<PointingTask>(*oink_, *scene_, goal, task_options);
+  fk_data_ = std::make_unique<pinocchio::Data>(scene_->getModel());
   tasks_ = {frame_task_};
 
   constraints_.push_back(std::make_shared<roboplan::PositionLimit>(*oink_, position_limit_gain_));
@@ -376,6 +378,24 @@ void CartesianServoNode::createInterfaces() {
         },
         rmw_qos_profile_services_default, service_group_));
   };
+  // Free tool roll (point tracking in the UI): only the position and the
+  // direction of the tool z axis are servoed; the roll (joint 6 on the FR20)
+  // is left to OInK, within the joint limits. Takes effect in the next cycle,
+  // in any state; reported in /fairino_servo/status.
+  services_.push_back(create_service<std_srvs::srv::SetBool>(
+      "/fairino_servo/set_free_tool_roll",
+      [this](const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+             std::shared_ptr<std_srvs::srv::SetBool::Response> response) {
+        const bool previous = free_roll_requested_.exchange(request->data);
+        response->success = true;
+        response->message = request->data ? "free tool roll: position and tool z axis only"
+                                          : "full pose (position and orientation)";
+        if (previous != request->data) {
+          audit("operator", "free_tool_roll", previous ? "on" : "off", request->data ? "on" : "off", true,
+                response->message);
+        }
+      },
+      rmw_qos_profile_services_default, service_group_));
   add_trigger("/fairino_servo/enable", [this]() { return submit(OperationKind::kEnable, "operator", 15.0); });
   add_trigger("/fairino_servo/disable", [this]() { return submit(OperationKind::kDisable, "operator", 15.0); });
   add_trigger("/fairino_servo/recover", [this]() { return submit(OperationKind::kRecover, "operator", 60.0); });
@@ -1478,6 +1498,7 @@ void CartesianServoNode::publishStatus() {
   msg.command_frequency_hz = command_frequency_;
   msg.self_collision_pairs = static_cast<uint32_t>(std::max(0, self_collision_pairs_));
   msg.realtime_scheduling = realtime_scheduling_.load();
+  msg.free_tool_roll = free_roll_requested_.load();
   {
     std::lock_guard<std::mutex> lock(timing_mutex_);
     for (const auto& summary : timing_summaries_) {
@@ -1773,6 +1794,20 @@ bool CartesianServoNode::solveStep(Clock::time_point now) {
     seq = target_seq_;
     received = target_received_;
   }
+  // Switch between the full-pose and the free-roll task (no allocation).
+  const bool free_roll = free_roll_requested_.load();
+  if (free_roll != free_roll_active_) {
+    tasks_[0] = free_roll ? std::static_pointer_cast<roboplan::Task>(pointing_task_)
+                          : std::static_pointer_cast<roboplan::Task>(frame_task_);
+    free_roll_active_ = free_roll;
+  }
+  if (received && seq != last_target_seq_ && free_roll) {
+    // Free roll: keep the pointing direction, take the roll of the current
+    // command, so the filter, the rate limiter and a later switch back to
+    // the full pose all see the robot's own roll (no roll transient).
+    const pinocchio::SE3 current(scene_->forwardKinematics(*fk_data_, segment_end_, tip_frame_, base_frame_));
+    sample.rotation(alignToolAxis(current.rotation(), sample.rotation().col(2)));
+  }
   if (received && seq != last_target_seq_) {
     if (target_acquired_) {
       raw_target_ = sample;
@@ -1805,6 +1840,7 @@ bool CartesianServoNode::solveStep(Clock::time_point now) {
   // RoboPlan OInK: FrameTask base_link -> flange with position, velocity
   // and acceleration limits (and the optional self-collision barrier).
   frame_task_->setTargetFrameTransform(limited_target_.toHomogeneousMatrix());
+  pointing_task_->setTargetFrameTransform(limited_target_.toHomogeneousMatrix());
   if (acceleration_limit_) {
     acceleration_limit_->setLastVelocity(previous_delta_ / dt);
     delta_q_target_.setZero();

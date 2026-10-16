@@ -37,6 +37,7 @@ float64 solver_frequency_hz
 float64 command_frequency_hz
 uint32 self_collision_pairs
 bool realtime_scheduling     # SCHED_FIFO obtained for the servo thread
+bool free_tool_roll          # point tracking: only the position and the tool z axis are servoed
 TimingStats[] timing
 
 # Limits actually applied by the servo (software limits, not FAIRINO safety limits).

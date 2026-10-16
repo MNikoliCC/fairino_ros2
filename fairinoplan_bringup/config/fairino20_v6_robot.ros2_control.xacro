@@ -3,7 +3,7 @@
 
   <xacro:macro
     name="fairino20_v6_robot_ros2_control"
-    params="name initial_positions_file use_mock_hardware controller_ip:=192.168.58.2 allow_safety_config_writes:=false">
+    params="name initial_positions_file use_mock_hardware controller_ip:=192.168.58.2 allow_safety_config_writes:=false servoj_cmd_period:=0.001 servoj_max_queue:=8">
 
     <xacro:property
       name="initial_positions"
@@ -18,8 +18,12 @@
         <xacro:unless value="${use_mock_hardware}">
           <plugin>fairino_hardware/FairinoHardwareInterface</plugin>
           <param name="controller_ip">${controller_ip}</param>
-          <!-- ServoJ over UDP (robot port 20007), cmdT = ros2_control period. -->
-          <param name="servoj_cmd_period">0.001</param>
+          <!-- ServoJ over UDP (robot port 20007). cmdT = time the controller
+               takes for one point: 0.001 = ros2_control period (real robot);
+               0.002 (with servoj_max_queue 1) for SimMachine, which executes
+               only 500-930 points/s, so 1 ms points capped the joints at
+               50-93 % of v_max. -->
+          <param name="servoj_cmd_period">${servoj_cmd_period}</param>
           <!-- CNDE realtime state period (4 ms = 250 Hz is the SDK minimum). -->
           <param name="realtime_state_period_ms">4</param>
           <param name="status_rate">50.0</param>
@@ -37,7 +41,7 @@
           <param name="standstill_velocity_deg_s">0.5</param>
           <!-- ServoJ FIFO flow control: skip a cycle when sent - executed points
                (servoJCmdNum) exceeds this; 0 disables it. See RobotStatus.msg. -->
-          <param name="servoj_max_queue">8</param>
+          <param name="servoj_max_queue">${servoj_max_queue}</param>
           <!-- Max step of one ServoJ point = factor x v_max x cmdT. -->
           <param name="point_velocity_factor">1.0</param>
           <!-- SAFETY-RELATED: SetVelReducePara is refused unless explicitly allowed. -->

@@ -39,6 +39,7 @@ target_link_libraries(fairino_servo_core PUBLIC pinocchio::pinocchio Eigen3::Eig
 add_executable(fairino_cartesian_servo
   src/main.cpp
   src/cartesian_servo_node.cpp
+  src/pointing_task.cpp
 )
 target_link_libraries(fairino_cartesian_servo
   fairino_servo_core

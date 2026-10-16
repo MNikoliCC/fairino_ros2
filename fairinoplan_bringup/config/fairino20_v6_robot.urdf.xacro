@@ -5,6 +5,8 @@
   <xacro:arg name="use_mock_hardware" default="false"/>
   <xacro:arg name="controller_ip" default="192.168.58.2"/>
   <xacro:arg name="allow_safety_config_writes" default="false"/>
+  <xacro:arg name="servoj_cmd_period" default="0.001"/>
+  <xacro:arg name="servoj_max_queue" default="8"/>
 
   <!-- Geometry + kinematic model. -->
   <xacro:include filename="$(find fairino_description)/urdf/fairino20_v6.urdf"/>
@@ -17,6 +19,8 @@
     initial_positions_file="$(arg initial_positions_file)"
     use_mock_hardware="$(arg use_mock_hardware)"
     controller_ip="$(arg controller_ip)"
-    allow_safety_config_writes="$(arg allow_safety_config_writes)"/>
+    allow_safety_config_writes="$(arg allow_safety_config_writes)"
+    servoj_cmd_period="$(arg servoj_cmd_period)"
+    servoj_max_queue="$(arg servoj_max_queue)"/>
 
 </robot>

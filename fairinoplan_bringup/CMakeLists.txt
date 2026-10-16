@@ -18,4 +18,12 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Modules imported by the scripts above (same directory = on sys.path).
+install(
+  FILES
+    scripts/fairino_trajectory_tools.py
+    scripts/fairino_viser_trajectories.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

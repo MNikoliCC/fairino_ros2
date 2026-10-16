@@ -32,7 +32,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
 
 LATCHED = QoSProfile(
     depth=1,
@@ -55,6 +55,7 @@ class Benchmark(Node):
         self.max_tracking_error = 0.0
         self.robot_samples: list[RobotStatus] = []
         self.pub = self.create_publisher(PoseStamped, "/fairino_servo/target_pose", 1)
+        self.free_roll_client = self.create_client(SetBool, "/fairino_servo/set_free_tool_roll")
         self.create_subscription(ServoStatus, "/fairino_servo/status", self.on_servo, 10)
         self.create_subscription(RobotStatus, "/fairino_robot/status", self.on_robot, 10)
         self.create_subscription(PoseStamped, "/fairino_servo/reset_target_pose", self.on_reset, LATCHED)
@@ -71,6 +72,10 @@ class Benchmark(Node):
         self.tip = self.model.getFrameId("flange")
 
     def measured_tcp(self) -> np.ndarray | None:
+        pose = self.measured_pose()
+        return None if pose is None else pose.translation.copy()
+
+    def measured_pose(self) -> pin.SE3 | None:
         with self.lock:
             msg = self.last_joint
         if msg is None:
@@ -80,7 +85,7 @@ class Benchmark(Node):
             if self.model.existJointName(name):
                 q[self.model.joints[self.model.getJointId(name)].idx_q] = value
         pin.framesForwardKinematics(self.model, self.data, q)
-        return self.data.oMf[self.tip].translation.copy()
+        return self.data.oMf[self.tip].copy()
 
     def on_servo(self, msg: ServoStatus) -> None:
         with self.lock:
@@ -105,6 +110,16 @@ class Benchmark(Node):
             self.last_joint = msg
             if self.recording:
                 self.joint_count += 1
+
+    def set_free_roll(self, value: bool) -> None:
+        if not self.free_roll_client.wait_for_service(timeout_sec=5.0):
+            raise RuntimeError("/fairino_servo/set_free_tool_roll not available")
+        future = self.free_roll_client.call_async(SetBool.Request(data=value))
+        deadline = time.monotonic() + 5.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not future.done() or not future.result().success:
+            raise RuntimeError("/fairino_servo/set_free_tool_roll failed")
 
     def call(self, name: str, timeout: float = 20.0) -> Trigger.Response:
         client = self.clients_[name]
@@ -147,6 +162,14 @@ def main() -> None:
     parser.add_argument("--label", default="")
     parser.add_argument("--output", default="")
     parser.add_argument("--disable-at-end", action="store_true")
+    parser.add_argument(
+        "--free-roll", action="store_true",
+        help="servo only the position and the tool z axis (/fairino_servo/set_free_tool_roll), as point tracking does",
+    )
+    parser.add_argument(
+        "--tilt-axis", choices=["z", "x"], default="z",
+        help="tool axis of the orientation oscillation: z = roll (ignored with --free-roll), x = tilts the tool axis",
+    )
     args = parser.parse_args()
 
     rclpy.init()
@@ -175,6 +198,7 @@ def main() -> None:
         start_pose = pose_to_se3(node.reset_pose)
         print(f"start TCP: {np.round(start_pose.translation, 4).tolist()}")
 
+        node.set_free_roll(args.free_roll)
         node.call("reset_timing")
         with node.lock:
             node.recording = True
@@ -183,6 +207,8 @@ def main() -> None:
         started = time.monotonic()
         next_time = started
         position_errors = []
+        pointing_errors = []
+        axis = np.array([0.0, 0.0, 1.0]) if args.tilt_axis == "z" else np.array([1.0, 0.0, 0.0])
         while True:
             t = time.monotonic() - started
             if t >= args.duration:
@@ -190,12 +216,14 @@ def main() -> None:
             scale = min(1.0, t / args.ramp) if args.ramp > 0.0 else 1.0
             scale = scale * scale * (3.0 - 2.0 * scale)
             offset = np.array([0.0, math.sin(omega * t), 1.0 - math.cos(omega * t)]) * args.radius * scale
-            rotation = pin.exp3(np.array([0.0, 0.0, args.rotation * scale * math.sin(omega * t)]))
+            rotation = pin.exp3(axis * args.rotation * scale * math.sin(omega * t))
             target = pin.SE3(start_pose.rotation @ rotation, start_pose.translation + offset)
             node.pub.publish(se3_to_pose(target, node.get_clock().now().to_msg()))
-            measured = node.measured_tcp()
+            measured = node.measured_pose()
             if measured is not None and t > args.ramp:
-                position_errors.append(float(np.linalg.norm(measured - target.translation)))
+                position_errors.append(float(np.linalg.norm(measured.translation - target.translation)))
+                cos = float(np.clip(measured.rotation[:, 2] @ target.rotation[:, 2], -1.0, 1.0))
+                pointing_errors.append(math.degrees(math.acos(cos)))
             next_time += dt
             time.sleep(max(0.0, next_time - time.monotonic()))
         elapsed = time.monotonic() - started
@@ -203,6 +231,7 @@ def main() -> None:
             node.recording = False
         report = json.loads(node.call("timing_report").message)
         final_state = node.servo.state
+        node.set_free_roll(False)
         hold = node.call("hold")
         print(f"hold: {hold.success} {hold.message}")
         if args.disable_at_end:
@@ -230,6 +259,13 @@ def main() -> None:
                 "max": float(np.max(position_errors) * 1000.0) if position_errors else None,
             },
             "joint_states_rate_hz": node.joint_count / elapsed,
+            "free_roll": args.free_roll,
+            "tilt_axis": args.tilt_axis,
+            # Angle between the measured and the target tool z axis (includes the lag).
+            "tool_axis_error_deg": {
+                "rms": float(np.sqrt(np.mean(np.square(pointing_errors)))) if pointing_errors else None,
+                "max": float(np.max(pointing_errors)) if pointing_errors else None,
+            },
         }
         if robot:
             covered = (robot[-1].header.stamp.sec - robot[0].header.stamp.sec) + (
@@ -266,6 +302,10 @@ def main() -> None:
                 "write_period_max_ms": float(max(r.write_period_max_ms for r in robot)),
                 "write_period_overruns": int(sum(r.write_period_overruns for r in robot)),
                 "main_sub_codes_seen": sorted({(r.main_error_code, r.sub_error_code) for r in robot}),
+                "j6_range_deg": [
+                    float(min(r.joint_position_deg[5] for r in robot)),
+                    float(max(r.joint_position_deg[5] for r in robot)),
+                ],
             }
         print(json.dumps(result, indent=2))
         print()

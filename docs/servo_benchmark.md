@@ -217,3 +217,77 @@ ros2 run fairinoplan_bringup fairino_servo_benchmark.py --duration 60 --radius 0
 ros2 launch fairinoplan_bringup fairino20_viser_servo.launch.py use_mock_hardware:=false \
     solver_frequency:=250.0 self_collision_pairs:=5
 ```
+
+## 7. ServoJ rate on SimMachine and `servoj_cmd_period` (2026-10-16)
+
+Every ServoJ point tells the controller to move within `cmdT`, and the
+per-point step limit allows at most `v_max × cmdT` per point. The joints can
+therefore move at most at `executed points/s × cmdT × v_max`. The SimMachine
+does not execute 1000 points/s: its rate (increase of `servoJCmdNum` per
+second, logged from `/fairino_robot/status`) switches between about 930, 750
+and 500 points/s, and drops to 260–380 points/s when the host is busy (for
+example headless Chrome with software WebGL). With cmdT 1 ms this caps the
+joints at 50–93 % of v_max. A plan at the fastest timing uses 99 % of the
+limits, so the robot fell behind and cut curves (single-joint moves reach the
+full 120/180 deg/s; in the path test J3 and J4 were both flat at 0.50 × v_max).
+
+Recording → path → Execute at the fastest timing (83.5 s recording, 23 m,
+232 waypoints, 35.8 s plan, TCP up to 2 m/s), deviation of the measured TCP
+from the planned path (planner tracking report):
+
+| ServoJ cmdT / queue | executed points/s | max / mean deviation | max joint error at the same time | arrival after the controller |
+|---|---|---|---|---|
+| 1 ms / 8, earlier session | 885 → 750 → 496 | 17 mm (106 mm in one run) | 17 deg | — |
+| 1 ms / 8, fresh SimMachine | 743–1000 | 3.95 / 0.05 mm | 4.5 deg | — |
+| 1 ms / 8, fast mode | 927–931 | 0.97 / 0.02 mm | 0.95 deg | 8 ms |
+| 2 ms / 4 | 498–500 | 0.83 mm, but **0.55 s hidden latency** | — | — |
+| **2 ms / 1** | 435–500 | **0.84 / 0.04 mm** | 0.70 deg | 12 ms |
+| 2 ms / 1, headless Chrome running | 263–376 | 56 / 0.38 mm (reported with ⚠️) | — | — |
+
+Servo mode (benchmark circles, 30 s):
+
+| ServoJ cmdT / queue | slow circle TCP error RMS / max | fast circle TCP error RMS / max | command → robot delay | ServoJ calls/s |
+|---|---|---|---|---|
+| 1 ms / 8 (§3) | 5.7 / 6.8 mm | 43.2 / 48.2 mm | ≈ 30 ms | 682–823 |
+| 2 ms / 4 | 44.5 / 59.8 mm; fast circle: FAULT (tracking error 0.15 rad) | — | **0.548 s** | 500 |
+| **2 ms / 1** | 5.8 / 6.9 mm | 44.8 / 50.4 mm | 36 ms | 498–499 |
+
+With a queue limit of 4 the SimMachine built a hidden backlog of about 270
+points that `servoJCmdNum` did not show (the robot followed the command
+exactly, 0.548 s late); with 1 the delay is the same as with 1 ms points.
+No FAIRINO main/sub code in any run.
+
+Decision: SimMachine is started with `servoj_cmd_period:=0.002
+servoj_max_queue:=1`; the defaults stay 1 ms / 8 for the real controller,
+which must be measured with the same tools before changing them (Status tab:
+*ServoJ executed by the controller*; tracking line after every Execute).
+
+## 8. Free tool roll: PointingTask (2026-10-16)
+
+Point tracking now runs the servo with the free tool roll on
+(`/fairino_servo/set_free_tool_roll`): OInK tracks the position and the tool z axis only (see
+[viser_servo_architecture.md](viser_servo_architecture.md), *Free tool
+roll*). SimMachine, ServoJ 2 ms / queue 1, 30 s per run, orientation
+oscillation ±0.3 rad (`--rotation 0.3`).
+
+| Run | TCP error RMS / max | tool axis error RMS / max | j6 range | OInK mean / p99 / max | cycle p99 / max | overruns |
+|---|---|---|---|---|---|---|
+| full pose, slow circle (before the change) | 11.6 / 24.4 mm | — | — | 0.057 / 0.104 / 0.148 ms | 0.127 / 0.168 ms | 0 |
+| full pose, fast circle (before) | 57.9 / 136.0 mm | — | — | 0.058 / 0.107 / 0.139 ms | 0.130 / 0.163 ms | 0 |
+| full pose, slow (after, 2 runs) | 5.8–5.9 / 6.6–6.8 mm | 0.0 / 0.0° | −8.1…8.1° | 0.055–0.059 / 0.093–0.098 / 0.132–0.156 ms | 0.113–0.120 / 0.151–0.180 ms | 0 |
+| full pose, fast (after, 2 runs) | 44.0–44.1 / 48.9 mm | 0.1 / 0.2° | −1.7…1.5° | 0.058 / 0.100–0.102 / 0.161–0.189 ms | 0.121–0.124 / 0.178–2.463 ms | 0 / 3 (one host stall) |
+| **roll free**, slow, roll oscillation | 5.8 / 6.6 mm | 0.0 / 0.0° | **0.0…0.0°** | 0.053 / 0.096 / 0.137 ms | 0.119 / 0.160 ms | 0 |
+| **roll free**, fast, roll oscillation | 44.0 / 50.3 mm | 0.1 / 0.2° | **0.0…0.0°** | 0.052 / 0.088 / 0.132 ms | 0.110 / 0.157 ms | 0 |
+| **roll free**, slow, tilt (tool x) | 7.3 / 10.3 mm | 1.5 / 2.4° | **0.0…0.0°** | 0.055 / 0.093 / 0.133 ms | 0.115 / 0.164 ms | 0 |
+| full pose, slow, tilt | 7.4 / 10.4 mm | 1.6 / 2.4° | −3.4…3.1° | 0.059 / 0.102 / 0.150 ms | 0.124 / 0.172 ms | 0 |
+| **roll free**, fast, tilt | 48.4 / 67.8 mm | 3.7 / 5.7° | **0.0…0.0°** | 0.053 / 0.090 / 0.135 ms | 0.111 / 0.158 ms | 0 |
+| full pose, fast, tilt | 48.0 / 61.2 mm | 3.7 / 5.6° | −10.2…9.1° | 0.055 / 0.094 / 0.204 ms | 0.115 / 0.223 ms | 0 |
+
+The "before" TCP errors were a weaker SimMachine run (the same code earlier
+gave 5.7 / 43.2 mm, §7). Errors include the intended filter lag. No FAIRINO
+main/sub code and no state other than ACTIVE in any run. Decision: kept.
+
+```bash
+ros2 run fairinoplan_bringup fairino_servo_benchmark.py --duration 30 --radius 0.05 --period 4 \
+    --rotation 0.3 --free-roll --tilt-axis x --output /tmp/free_slow_x.json
+```

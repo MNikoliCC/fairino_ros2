@@ -53,6 +53,8 @@ services:
       - ../roboplan-ros:/ros2_ws/src/roboplan_ros:ro
       - ../fairinoplan_bringup:/ros2_ws/src/fairinoplan_bringup:ro
       - ../fairino_cartesian_servo:/ros2_ws/src/fairino_cartesian_servo:ro
+      # Recordings and paths from the Viser UI, kept on the host.
+      - ../trajectories:/ros2_ws/trajectories:rw
       - ros2-build:/ros2_ws/build
       - ros2-install:/ros2_ws/install
       - ros2-log:/ros2_ws/log

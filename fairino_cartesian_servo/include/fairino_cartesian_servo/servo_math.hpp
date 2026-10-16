@@ -19,6 +19,12 @@ pinocchio::SE3 rateLimitPose(const pinocchio::SE3& current, const pinocchio::SE3
 /// Translation [m] and rotation angle [rad] between two poses.
 void poseDistance(const pinocchio::SE3& a, const pinocchio::SE3& b, double& translation, double& rotation);
 
+/// The orientation whose z axis is `axis`, reached from `rotation` by the
+/// smallest rotation (its roll about z follows `rotation`). Used with a free
+/// tool roll: the target keeps the pointing direction, the roll of the
+/// robot's current pose.
+Eigen::Matrix3d alignToolAxis(const Eigen::Matrix3d& rotation, const Eigen::Vector3d& axis);
+
 /// Summary of one timing window.
 struct TimingSummary {
   std::string name;

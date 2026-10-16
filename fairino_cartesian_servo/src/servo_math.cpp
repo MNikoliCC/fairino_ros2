@@ -64,6 +64,22 @@ void TimingRecorder::record(double milliseconds) {
   }
 }
 
+Eigen::Matrix3d alignToolAxis(const Eigen::Matrix3d& rotation, const Eigen::Vector3d& axis) {
+  const Eigen::Vector3d from = rotation.col(2);
+  const Eigen::Vector3d to = axis.normalized();
+  const Eigen::Vector3d cross = from.cross(to);
+  const double sin = cross.norm();
+  const double cos = std::clamp(from.dot(to), -1.0, 1.0);
+  if (sin < 1e-12) {
+    if (cos > 0.0) {
+      return rotation;
+    }
+    // Opposite direction: half a turn about the current x axis.
+    return pinocchio::exp3(rotation.col(0) * M_PI) * rotation;
+  }
+  return pinocchio::exp3(cross / sin * std::atan2(sin, cos)) * rotation;
+}
+
 namespace {
 
 void fillPercentiles(std::vector<float>& samples, TimingSummary& summary) {

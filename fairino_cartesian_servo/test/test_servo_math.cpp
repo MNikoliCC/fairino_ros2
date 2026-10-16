@@ -4,6 +4,7 @@
 
 #include "fairino_cartesian_servo/servo_math.hpp"
 
+using fairino_cartesian_servo::alignToolAxis;
 using fairino_cartesian_servo::poseDistance;
 using fairino_cartesian_servo::rateLimitPose;
 using fairino_cartesian_servo::TimingRecorder;
@@ -64,4 +65,18 @@ TEST(TimingRecorder, ResetIsAppliedByTheProducer) {
   EXPECT_EQ(total.overruns_total, 0u);
   EXPECT_NEAR(total.max_ms, 0.7, 1e-6);
   EXPECT_NEAR(total.p99_ms, 0.7, 1e-6);  // percentiles exclude pre-reset samples
+}
+
+TEST(AlignToolAxis, PointsZAndKeepsTheRoll) {
+  const Eigen::Matrix3d rotation = pinocchio::exp3(Eigen::Vector3d(0.3, -0.2, 1.1));
+  const Eigen::Vector3d axis = Eigen::Vector3d(0.2, 0.9, -0.4).normalized();
+  const Eigen::Matrix3d aligned = alignToolAxis(rotation, axis);
+  EXPECT_TRUE(aligned.col(2).isApprox(axis, 1e-12));
+  // Smallest rotation: the turn axis is perpendicular to both z axes, so
+  // there is no extra rotation about the tool axis.
+  const Eigen::Vector3d turn = pinocchio::log3(aligned * rotation.transpose());
+  EXPECT_NEAR(turn.dot(rotation.col(2)), 0.0, 1e-9);
+  EXPECT_NEAR(turn.dot(axis), 0.0, 1e-9);
+  EXPECT_TRUE(alignToolAxis(rotation, rotation.col(2)).isApprox(rotation));
+  EXPECT_TRUE(alignToolAxis(rotation, -rotation.col(2)).col(2).isApprox(-rotation.col(2), 1e-12));
 }

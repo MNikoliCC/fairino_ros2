@@ -134,6 +134,14 @@ The privileged SimMachine container runs as `root` on the `fairino-net` bridge
 network (`192.168.58.0/24`), using `192.168.58.2` with gateway `192.168.58.1`.
 The ROS container remains non-root at `192.168.58.3`.
 
+## Recordings and paths
+
+`docker/compose.yaml` bind-mounts `fairino_ros2/trajectories` to
+`/ros2_ws/trajectories`; the Viser UI stores recordings and drawn paths there
+(see `docs/trajectory_recording_and_paths.md`). A container created before
+this mount was added keeps writing to `~/.ros/fairino_trajectories` inside the
+container until it is recreated with `docker compose up -d`.
+
 ## Change the Robot Model
 
 To change the robot model in the SimMachine WebApp:
