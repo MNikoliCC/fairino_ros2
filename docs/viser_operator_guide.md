@@ -78,7 +78,8 @@ frame of the last second (`60 fps · max frame 20 ms`), measured in the page;
 a low value means the browser/GPU is slow, it does not affect the robot.
 
 **Trajectory timeline** (panel along the bottom, from the left edge to the
-control panel; `–` minimizes it): uPlot charts of the plan that waits for
+control panel; `–` minimizes it to a bar at the bottom, `+` opens it again;
+new plans never move or reopen it): uPlot charts of the plan that waits for
 Execute (path, segments, gizmo, Home, replay) over time, at the chosen
 *Speed*. *Show* **☑ TCP / ☐ Positions / ☐ Velocities / ☐ Accelerations**
 picks any combination; the charts are stacked (the panel grows upward with
@@ -232,7 +233,8 @@ target pose (its arrows and rings are the tool axes). `base_link`: the gizmo
 rests at the base axes; moving it moves the target, turning a ring turns the
 target about that base axis, and after release the gizmo returns to the base
 axes while small axes at the target show its orientation. The same applies to
-the waypoint gizmo in the Path editor's Edit mode. While point tracking is on the
+the waypoint gizmo in the Path editor's Edit mode. The small axes are 1.5×
+the gizmo's size so they stick out of it (they share its point). While point tracking is on the
 gizmo always uses `base_link` axes without rotation (the point decides) and
 the choice is hidden.
 
@@ -323,24 +325,74 @@ Short form; details, file format and measurements in
   the reason is in the top-left window) and **Plan** plans it; with it, it
   is planned after every change. The *Waypoint* folder shows `gizmo` in Draw
   mode (its pose and a `gizmo` row in the table) or the selected waypoint in
-  Edit mode (pose, **Stop [s]**: a rest at that waypoint, **Straight**,
-  **Delete Waypoint**), moves the gizmo or the waypoint by an exact offset
-  (*Move*, *Rotate*, *Frame*, **Apply Offset**) and lists all waypoints in
-  `base_link` (⏸ = stop). Check the preview and press **Execute** in *Plan &
-  Execute*. **Clear** removes the path and the plan.
+  Edit mode (pose, **Stop [s]**: a rest at that waypoint, **Blend [mm]**: the
+  corner blend radius, **Straight**, **Delete Waypoint**), moves the gizmo or
+  the waypoint by an exact offset (*Move*, *Rotate*, *Frame*, **Apply
+  Offset**) and lists all waypoints in `base_link` (⏸ = stop, ◠ = blend).
+- **Corner blend radius**: at a straight waypoint between two segments the
+  robot stops; with a blend radius it rounds the corner instead and keeps
+  moving. Set *Blend [mm]*, or drag the blend handle: in *Edit* a third small
+  gizmo with one arrow on the inner bisector of the selected corner, labelled `R … mm`
+  (its distance from the waypoint is the radius; closer than 20 mm = sharp
+  corner). The rounded path is drawn as the robot will move. At most half
+  the shorter neighbouring segment; no effect at curve waypoints or without
+  a corner; with *Stop [s]* the robot rests at the middle of the rounding
+  (the table shows both, e.g. `2 ⏸1.0s ◠60`). A small radius usually saves time; a large one
+  makes a long curve that the joint accelerations allow only at moderate
+  speed (details in [trajectory_recording_and_paths.md](trajectory_recording_and_paths.md)). Check the preview and press **Execute** in *Plan &
+  Execute*. **Clear Trajectory** (below New Trajectory) removes the path and
+  the plan; *Edit* **Undo / Redo** undo and redo every change, Clear included.
+  A *Segments* plan that starts or ends at a blended waypoint starts/ends at
+  rest there (at the middle of the rounding): the blend works only where the
+  planned motion passes through the waypoint.
 - **Drawing in the servo view**: while the servo gizmo is held (mouse
   button down) its motion is recorded from the last waypoint, the robot
   follows it as usual, and a green line shows it. Time runs only while the
   gizmo is held: after a release nothing is recorded; holding it still for
-  0.5 s or longer becomes a stop (*Stop [s]* of a waypoint). **Confirm
-  Waypoint** turns the drawing into curve waypoints with the drawn segment
-  times (as *Edit as Path*, 3 mm tolerance) and ends it with a waypoint at
-  the gizmo; drawing then continues from there. Without a drawing it only
+  0.5 s or longer becomes a stop. **Confirm Waypoint** turns the drawing into
+  one **drawn segment** (✍) from the last waypoint to a new waypoint at the
+  gizmo; drawing then continues from there. Its inner points (the drawing
+  filtered as *Edit as Path* does: RDP and Bezier curves) are not shown: no
+  spheres, numbers or table rows. Under *Drawn segment* (Servo folder, the
+  last one is chosen after a Confirm): **Simplify [mm]** (0–10 mm in 0.1 mm steps, 0 = every
+  drawn point; and 2/3° per mm in orientation) re-filters the drawing and the path is redrawn at
+  once (larger = smoother, unsteady mouse motions removed); **Speed** 0–1:
+  every part takes drawn − speed × (drawn − fastest), so 0 = as drawn, 1 =
+  the fastest, 0.5 = halfway (the planner knows the fastest times). At 0
+  (as drawn) parts drawn faster than the robot can are red — they run as fast
+  as possible; above 0 nothing is red (a part drawn too fast runs at its
+  fastest at every speed). A larger *Simplify* removes small zig-zags, so
+  red parts can become feasible at the drawn speed; **Delete Drawn Segment** (at the end
+  of the path everything its Confirm added, so the path ends at the waypoint
+  before it again; in the middle it becomes a straight segment). The
+  drawing is saved with the path file, so it can be tuned after loading.
+  **The drawing records the gizmo, not the robot.** The servo never faults
+  because the gizmo runs away: it limits the speed (2 m/s, 180 °/s, joint
+  speed and acceleration limits) and keeps the joints within their limits, so
+  when the gizmo is moved faster than the robot can follow, or out of the
+  robot's reach (arm fully stretched, too close to the base axis), the robot
+  only falls behind or stops at the nearest pose it can reach. While
+  drawing, the line turns red where the robot was more than 80 mm behind the
+  gizmo and the Servo folder says *the robot could not keep up* (also shown
+  for the drawn segment after Confirm). Such a drawing is planned as drawn,
+  so an unreachable part makes the plan fail.
+  When a check or plan fails, the failing segment is red and a red sphere
+  *✕ fails here* marks the exact place (a failed part of a drawn segment can
+  be a few mm long); the message says why (e.g. *out of the robot's reach
+  (arm fully stretched, j3 ≈ 0°)*). The other segments are then grey (not
+  checked: speeds are known only for a path that can be followed), never
+  green; a successful *Segments* plan makes only its own segments green again.
+  The chosen drawn segment is drawn thicker and keeps its colours (green,
+  red where too fast); the servo view shows no yellow selection, so the
+  colours stay visible while the filter and speed are tuned. Without a drawing it only
   adds a waypoint at the gizmo (teaching by driving the robot; the first one
   starts the path). If the drawing does not start at the last waypoint (e.g.
-  the robot was elsewhere), a straight segment joins them; execute the path
-  first to continue exactly from its end. **Discard** drops the unconfirmed
-  drawing, **Undo** removes the last confirmed addition.
+  the robot was elsewhere), a straight segment joins them; **Go to Last
+  Waypoint** (below Home) plans and executes the move to the path's last
+  waypoint and servos again, so drawing continues exactly from there.
+  **Discard** drops the unconfirmed drawing, **Undo** removes the last
+  confirmed addition. An unconfirmed drawing is also dropped whenever the
+  servo restarts from the robot's pose (enable, resume).
 - After every **Execute**, the top-left window shows one line:
   largest and mean distance of the measured TCP from the planned path, the
   executed vs. planned time and the lowest ServoJ rate the controller kept

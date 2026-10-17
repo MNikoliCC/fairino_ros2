@@ -70,7 +70,11 @@ class TargetGizmo:
         self._visible = True
         self.initialized = False
         self.controls = scene.add_transform_controls(name, scale=scale, depth_test=False, disable_sliders=False)
-        self._axes = scene.add_frame(f"{name}_orientation", axes_length=0.12, axes_radius=0.005, visible=False)
+        # Target orientation in base_link axes mode: longer than the gizmo's
+        # arrows (it sits at the same point and would be hidden under them).
+        self._axes = scene.add_frame(
+            f"{name}_orientation", axes_length=1.5 * scale, axes_radius=0.004, visible=False
+        )
         self._line = scene.add_line_segments(
             f"{name}_line", points=np.zeros((1, 2, 3)), colors=(230, 40, 40), thickness=0.0015, visible=False
         )

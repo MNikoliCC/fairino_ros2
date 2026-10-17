@@ -342,7 +342,10 @@ class FairinoViserUi(Node):
         self._servo_gizmo = TargetGizmo(
             scene, "/fairino/tcp_target", base_rotation=self._base_rotation, point=lambda: self._track_point,
             roll_source=lambda: self._tip_rotation, turn_rate=POINT_TRACKING_TURN_RATE,
-            turning=lambda: self._servo is not None and self._servo.state == "ACTIVE",
+            # Turn gradually in the servo view, also right after an enable
+            # (the servo accepts a target only near the robot's pose; a jump
+            # toward the point before the UI saw ACTIVE was never accepted).
+            turning=lambda: self._mode_view == "servo",
             on_change=self._publish_servo_target,
             on_hold=self.path_editor.servo_hold,  # drawing in the servo view
         )
@@ -414,6 +417,12 @@ class FairinoViserUi(Node):
             "Home", icon=viser.Icon.HOME,
             hint="Plans and executes the motion to the home joint pose (from the servo view it returns to servoing)",
         )
+        self._last_wp_button = gui.add_button(
+            "Go to Last Waypoint", icon=viser.Icon.ARROW_FORWARD_UP,
+            hint="Plans and executes the move to the path's last waypoint (from the servo view it returns to "
+            "servoing, so drawing continues from there; otherwise a straight segment joins the last waypoint to "
+            "the drawing)",
+        )
 
         # ---- Servo view
         servo_folder = gui.add_folder("Servo")
@@ -437,6 +446,8 @@ class FairinoViserUi(Node):
                 "and a waypoint at the gizmo; without a drawing only the waypoint (the first one starts the path)",
             )
             self._drawing_buttons = gui.add_button_group("Drawing", ["Undo", "Discard"])
+            # The drawn segment (✍) chosen here: filter, speed, delete.
+            self.path_editor.build_stroke_controls(gui)
         self._servo_folders = [servo_folder]
 
         # ---- Trajectory view
@@ -513,6 +524,7 @@ class FairinoViserUi(Node):
             lambda e: self.path_editor.servo_undo() if e.target.value == "Undo" else self.path_editor.servo_discard()
         )
         self._speed_slider.on_update(lambda _: self._publish_speed())
+        self._last_wp_button.on_click(lambda _: self._go_to_last_waypoint())
         self._track_button.on_click(lambda _: self._toggle_tracking())
         self._axes_control.on_click(lambda e: self._on_servo_axes("base" if "base_link" in str(e.target.value) else "tool"))
         self._look_vector.on_update(lambda _: self._on_look_vector())
@@ -811,6 +823,9 @@ class FairinoViserUi(Node):
         o = msg.pose.orientation
         base_target = pin.SE3(pin.Quaternion(o.w, o.x, o.y, o.z).normalized().matrix(), np.array([p.x, p.y, p.z]))
         self._servo_gizmo.set_pose(self._base_pose * base_target)
+        # The servo restarted from the robot's pose: an unconfirmed drawing
+        # no longer belongs to it.
+        self.path_editor.servo_discard(quiet=True)
 
     # ---------------------------------------------------------- point tracking
     def _tracking_tick(self) -> None:
@@ -998,13 +1013,14 @@ class FairinoViserUi(Node):
             return
         self._timeline_key = key
         what = self._plan_what(status) if matches else "plan"
-        first = int(status.get("first_segment", 0)) + 1
+        labels = self.path_editor.mark_labels(int(status.get("first_segment", 0)), len(marks)) if marks else []
+        shown = [(t, label) for t, label in zip(marks, labels) if label is not None]  # not inside drawn strokes
         title = f"Planned trajectory: {what} · {duration:.2f} s"
         if matches and status.get("speed", 1.0) < 0.999:
             title += f" · speed {status['speed']:.2f}"
-        if marks:
-            title += f" · ● waypoints {first}–{first + len(marks) - 1}"
-        self._timeline.set_plan(plan, marks, title, first_waypoint=first)
+        if shown:
+            title += f" · ● waypoints {shown[0][1]}–{shown[-1][1]}"
+        self._timeline.set_plan(plan, [t for t, _ in shown], title, labels=[label for _, label in shown])
 
     # ------------------------------------------------------------ kinematics
     def _world_poses(self) -> tuple[pin.SE3, pin.SE3]:
@@ -1138,6 +1154,31 @@ class FairinoViserUi(Node):
         self._homing = True
         threading.Thread(target=self._home_sequence, daemon=True).start()
 
+    def _go_to_last_waypoint(self) -> None:
+        """Servo view: move the robot to the end of the path (planned, like
+        Home), then servo again, so drawing continues from the last waypoint."""
+        end = self.path_editor.last_waypoint()
+        if end is None:
+            self._set_result("Go to Last Waypoint: the path has no waypoint")
+            return
+        if self._homing:
+            return
+        self._homing = True
+
+        def plan() -> None:
+            pose = PoseStamped()
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.header.frame_id = "base_link"
+            pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = (float(v) for v in end[0])
+            pose.pose.orientation.w, pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z = (
+                float(v) for v in end[1]
+            )
+            self._last_joint_plan = "last waypoint"
+            self._plan_goal_pub.publish(pose)
+            self._set_result("Go to Last Waypoint: planning…")
+
+        threading.Thread(target=self._home_sequence, args=("Go to Last Waypoint", plan), daemon=True).start()
+
     def _wait_for(self, condition, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -1154,14 +1195,14 @@ class FairinoViserUi(Node):
             return None
         return future.result()
 
-    def _home_sequence(self) -> None:
-        """Home: plan mode if needed → plan to the home pose → Execute → back
-        to servoing if it was started from the servo view."""
+    def _home_sequence(self, name: str = "Home", plan=None) -> None:
+        """Home (or another planned move): plan mode if needed → plan → Execute
+        → back to servoing if it was started from the servo view."""
         back_to_servo = self._mode_view == "servo"
         try:
             servo = self._servo
             if servo is not None and (servo.mode != "plan" or servo.state != "DISABLED"):
-                self._set_result("Home: switching to plan mode…")
+                self._set_result(f"{name}: switching to plan mode…")
                 response = self._service(self._servo_clients["disable"], Trigger.Request())
                 if response is None or not response.success:
                     raise RuntimeError(f"plan mode refused ({getattr(response, 'message', 'no answer')})")
@@ -1170,7 +1211,7 @@ class FairinoViserUi(Node):
                 ):
                     raise RuntimeError("the servo did not reach plan mode")
             before = float(self._plan_status.get("stamp", 0.0))
-            self._plan_home()
+            (plan or self._plan_home)()
 
             def planned() -> bool:
                 plan = self._plan_status
@@ -1178,7 +1219,7 @@ class FairinoViserUi(Node):
 
             if not self._wait_for(planned, 20.0) or self._plan_status.get("state") != "planned":
                 raise RuntimeError(f"planning failed ({self._plan_status.get('message', 'no answer')})")
-            self._set_result("Home: executing…")
+            self._set_result(f"{name}: executing…")
             response = self._service(self._execute_client, Trigger.Request())
             if response is None or not response.success:
                 raise RuntimeError(f"Execute refused ({getattr(response, 'message', 'no answer')})")
@@ -1190,9 +1231,9 @@ class FairinoViserUi(Node):
                 self._service(self._servo_clients["enable"], Trigger.Request())
                 if self._tracking_on:
                     self._request_free_roll(True)
-            self._set_result("Home: done" + (" (servoing again)" if back_to_servo else ""))
+            self._set_result(f"{name}: done" + (" (servoing again)" if back_to_servo else ""))
         except RuntimeError as exc:
-            self._set_result(f"Home: {exc}")
+            self._set_result(f"{name}: {exc}")
         finally:
             self._homing = False
 
@@ -1452,6 +1493,7 @@ class FairinoViserUi(Node):
             self._recover_button.visible = fault
             self._fault_markdown.visible = fault
         self._home_button.disabled = self._homing or state in ("FAULT", "LOCKOUT", "RECOVERING", "UNKNOWN")
+        self._last_wp_button.disabled = self._home_button.disabled or self.path_editor.last_waypoint() is None
         self._execute_button.disabled = not plan_mode or plan.get("state") != "planned"
         self._safety_button.disabled = robot is None or not robot.safety_config_writes_allowed
 

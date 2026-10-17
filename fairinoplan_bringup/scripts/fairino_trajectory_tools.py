@@ -55,10 +55,17 @@ MAX_SPEED_M_S = 2.0
 class PathError(RuntimeError):
     """Planning failed for a reason the operator can fix (with details)."""
 
-    def __init__(self, message: str, segments: list[int] | None = None, fraction: float | None = None):
+    def __init__(
+        self,
+        message: str,
+        segments: list[int] | None = None,
+        fraction: float | None = None,
+        position: np.ndarray | None = None,
+    ):
         super().__init__(message)
         self.segments = segments or []
         self.fraction = fraction
+        self.position = None if position is None else [float(v) for v in position]  # where (base_link)
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +125,8 @@ class Waypoint:
     curve: bool = False
     tangent: np.ndarray = field(default_factory=lambda: np.zeros(3))
     dwell: float = 0.0  # rest at this waypoint [s] (between two segments)
+    blend: float = 0.0  # corner blend radius [m]: the path rounds the corner instead of stopping
+    stroke: int | None = None  # inner waypoint of a drawn stroke (servo view): not shown, rebuilt from the drawing
 
     def to_dict(self) -> dict:
         return {
@@ -127,6 +136,8 @@ class Waypoint:
             "curve": bool(self.curve),
             "tangent_m": [float(v) for v in self.tangent],
             "dwell_s": float(self.dwell),
+            "blend_m": float(self.blend),
+            **({"stroke": int(self.stroke)} if self.stroke is not None else {}),
         }
 
     @staticmethod
@@ -139,10 +150,14 @@ class Waypoint:
             curve=bool(data.get("curve", False)) and np.linalg.norm(tangent) > 1e-9,
             tangent=tangent,
             dwell=max(0.0, float(data.get("dwell_s") or 0.0)),
+            blend=max(0.0, float(data.get("blend_m") or 0.0)),
+            stroke=None if data.get("stroke") is None else int(data["stroke"]),
         )
 
     def copy(self) -> "Waypoint":
-        return Waypoint(self.position.copy(), self.wxyz.copy(), self.curve, self.tangent.copy(), self.dwell)
+        return Waypoint(
+            self.position.copy(), self.wxyz.copy(), self.curve, self.tangent.copy(), self.dwell, self.blend, self.stroke
+        )
 
 
 @dataclass
@@ -150,17 +165,35 @@ class Segment:
     """Segment from waypoint k to k + 1. duration None: as fast as possible."""
 
     duration: float | None = None
+    origin: str | None = None  # "drawn" (servo view), "recorded" (Edit as Path), None (drawn as a line / curve)
+    stroke: int | None = None  # part of a drawn stroke (servo view)
+    speed: float | None = None  # drawn strokes: 0 = the drawn duration, 1 = the fastest, between: mixed
 
     def to_dict(self) -> dict:
-        return {"duration_s": None if self.duration is None else float(self.duration)}
+        data = {"duration_s": None if self.duration is None else float(self.duration)}
+        if self.origin:
+            data["origin"] = self.origin
+        if self.stroke is not None:
+            data["stroke"] = int(self.stroke)
+        if self.speed is not None:
+            data["speed"] = float(self.speed)
+        return data
 
     @staticmethod
     def from_dict(data: dict) -> "Segment":
         value = data.get("duration_s")
-        return Segment(None if value is None or float(value) <= 0.0 else float(value))
+        return Segment(
+            None if value is None or float(value) <= 0.0 else float(value), data.get("origin") or None,
+            None if data.get("stroke") is None else int(data["stroke"]),
+            None if data.get("speed") is None else float(data["speed"]),
+        )
 
     def copy(self) -> "Segment":
-        return Segment(self.duration)
+        return Segment(self.duration, self.origin, self.stroke, self.speed)
+
+    def request(self):
+        """Duration for the planner: a number, or (drawn, speed) for a drawn stroke."""
+        return (self.duration, self.speed) if self.speed is not None and self.duration else self.duration
 
 
 def default_tangent(waypoints: list[Waypoint], i: int) -> np.ndarray:
@@ -236,13 +269,142 @@ def segment_points(waypoints: list[Waypoint], k: int, step: float = DEFAULT_STEP
     return points, quats
 
 
+BLEND_MAX_FRACTION = 0.5  # of the shorter neighbouring segment: blends of neighbours meet at most
+BLEND_MIN_ANGLE_RAD = math.radians(1.0)  # below this there is no corner to round
+
+
+def corner_angle(waypoints: list[Waypoint], k: int) -> float:
+    """Change of direction at interior waypoint k [rad] (0 at the ends)."""
+    if k <= 0 or k >= len(waypoints) - 1:
+        return 0.0
+    d_in, d_out = _unit(_end_direction(waypoints, k - 1)), _unit(_start_direction(waypoints, k))
+    if np.linalg.norm(d_in) == 0.0 or np.linalg.norm(d_out) == 0.0:
+        return 0.0
+    return float(math.acos(float(np.clip(np.dot(d_in, d_out), -1.0, 1.0))))
+
+
+def blend_limit(waypoints: list[Waypoint], k: int) -> float:
+    """Largest blend radius at waypoint k [m]."""
+    if k <= 0 or k >= len(waypoints) - 1:
+        return 0.0
+    w = waypoints[k]
+    return BLEND_MAX_FRACTION * min(
+        float(np.linalg.norm(w.position - waypoints[k - 1].position)),
+        float(np.linalg.norm(waypoints[k + 1].position - w.position)),
+    )
+
+
+def blend_radius(waypoints: list[Waypoint], k: int) -> float:
+    """Blend radius used at waypoint k [m]: 0 at the ends, at curve waypoints
+    (already smooth) and without a corner; at most BLEND_MAX_FRACTION of the
+    shorter neighbouring segment. With a stop (dwell) the robot rests at the
+    middle of the rounding."""
+    if k <= 0 or k >= len(waypoints) - 1:
+        return 0.0
+    w = waypoints[k]
+    if w.blend <= 0.0 or w.curve or corner_angle(waypoints, k) < BLEND_MIN_ANGLE_RAD:
+        return 0.0
+    return min(w.blend, blend_limit(waypoints, k))
+
+
+def _trim(points: np.ndarray, quats: np.ndarray, start: float, end: float, step: float) -> tuple[np.ndarray, np.ndarray]:
+    """Samples of one segment without its first `start` and last `end`
+    metres of path (exact cut points interpolated; samples closer than half
+    a step to a cut are dropped: nearly equal neighbours make the numerical
+    path derivatives, hence the curvature speed limit, explode)."""
+    if start <= 0.0 and end <= 0.0:
+        return points, quats
+    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
+    a, b = start, s[-1] - end
+
+    def at(value: float) -> tuple[np.ndarray, np.ndarray]:
+        i = int(np.clip(np.searchsorted(s, value) - 1, 0, len(s) - 2))
+        f = 0.0 if s[i + 1] - s[i] < 1e-12 else (value - s[i]) / (s[i + 1] - s[i])
+        return points[i] + f * (points[i + 1] - points[i]), slerp_wxyz(quats[i], quats[i + 1], float(np.clip(f, 0, 1)))
+
+    if b - a < 1e-6:  # two roundings meet (each at half the segment): one point is left
+        pa, qa = at(min(a, s[-1]))
+        return pa[None, :], qa[None, :]
+    inner = (s > a + 0.5 * step) & (s < b - 0.5 * step)
+    pa, qa = at(a)
+    pb, qb = at(b)
+    return np.vstack([pa, points[inner], pb]), np.vstack([qa, quats[inner], qb])
+
+
+def _length(points: np.ndarray) -> float:
+    return float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+
+
+def _direction_at(points: np.ndarray, quats: np.ndarray, distance: float) -> np.ndarray:
+    """Unit direction of travel at a path distance along one segment."""
+    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
+    i = int(np.clip(np.searchsorted(s, float(np.clip(distance, 0.0, s[-1]))) - 1, 0, len(s) - 2))
+    return _unit(points[i + 1] - points[i])
+
+
+def _orientation_at(points: np.ndarray, quats: np.ndarray, distance: float) -> np.ndarray:
+    """Orientation at a path distance along samples of one segment."""
+    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
+    distance = float(np.clip(distance, 0.0, s[-1]))
+    i = int(np.clip(np.searchsorted(s, distance) - 1, 0, len(s) - 2))
+    f = 0.0 if s[i + 1] - s[i] < 1e-12 else (distance - s[i]) / (s[i + 1] - s[i])
+    return slerp_wxyz(quats[i], quats[i + 1], float(np.clip(f, 0.0, 1.0)))
+
+
+def _blend_curve(p_in, d_in, p_out, d_out, radius: float, step: float, incoming, outgoing):
+    """Round corner from p_in (end of the trimmed incoming segment, direction
+    d_in) to p_out: cubic Bezier tangent to both segments (for straight
+    segments the quadratic one with its control point at the corner). The
+    orientation continues the one of the sharp corner (incoming segment up to
+    the middle, then the outgoing one), so the turning rate has no step at
+    the ends of the rounding (a step made the curvature speed limit collapse)."""
+    c1, c2 = p_in + (2.0 / 3.0) * radius * d_in, p_out - (2.0 / 3.0) * radius * d_out
+    count = int(max(3, math.ceil(2.0 * radius / step) + 1))
+    u = np.linspace(0.0, 1.0, count)[:, None]
+    points = ((1 - u) ** 3) * p_in + 3 * ((1 - u) ** 2) * u * c1 + 3 * (1 - u) * (u**2) * c2 + (u**3) * p_out
+    lengths = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
+    fraction = lengths / lengths[-1] if lengths[-1] > 1e-12 else u[:, 0]
+    (in_points, in_quats), (out_points, out_quats) = incoming, outgoing
+    in_length = float(np.sum(np.linalg.norm(np.diff(in_points, axis=0), axis=1)))
+    quats = []
+    for f in fraction:
+        x = 2.0 * radius * float(f)  # distance along the sharp corner p_in -> corner -> p_out
+        quats.append(
+            _orientation_at(in_points, in_quats, in_length - radius + x) if x <= radius
+            else _orientation_at(out_points, out_quats, x - radius)
+        )
+    return points, np.array(quats), lengths
+
+
+def segment_pieces(waypoints: list[Waypoint], step: float = DEFAULT_STEP_M) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Samples (positions, wxyz) of every segment as the robot moves: corners
+    with a blend radius are cut and rounded; each half of the rounding
+    belongs to the segment on its side, so a segment ends at the middle of
+    the rounding (the closest point to the waypoint)."""
+    count = len(waypoints)
+    radii = [blend_radius(waypoints, k) for k in range(count)]
+    raw = [segment_points(waypoints, k, step) for k in range(count - 1)]
+    pieces = [_trim(points, quats, radii[k], radii[k + 1], step) for k, (points, quats) in enumerate(raw)]
+    for k in range(1, count - 1):
+        if radii[k] <= 0.0:
+            continue
+        (pa, qa), (pb, qb) = pieces[k - 1], pieces[k]
+        d_in = _direction_at(*raw[k - 1], _length(raw[k - 1][0]) - radii[k])
+        d_out = _direction_at(*raw[k], radii[k])
+        points, quats, lengths = _blend_curve(pa[-1], d_in, pb[0], d_out, radii[k], step, raw[k - 1], raw[k])
+        half = int(np.argmin(np.abs(lengths - 0.5 * lengths[-1])))
+        pieces[k - 1] = (np.vstack([pa, points[1:half + 1]]), np.vstack([qa, quats[1:half + 1]]))
+        pieces[k] = (np.vstack([points[half:], pb[1:]]), np.vstack([quats[half:], qb[1:]]))
+    return pieces
+
+
 def corner_stops(waypoints: list[Waypoint]) -> list[bool]:
     """True where the robot must stop: path start/end and every straight
     corner with a change of direction (> 1 degree)."""
     stops = [True] * len(waypoints)
     for k in range(1, len(waypoints) - 1):
-        if waypoints[k].curve:
-            stops[k] = False
+        if waypoints[k].curve or blend_radius(waypoints, k) > 0.0:
+            stops[k] = False  # a curve, or a corner rounded by its blend radius
             continue
         d_in = _unit(_end_direction(waypoints, k - 1))
         d_out = _unit(_start_direction(waypoints, k))
@@ -327,14 +489,16 @@ def sample_path(waypoints: list[Waypoint], step: float = DEFAULT_STEP_M, look_at
         for w in waypoints:
             w.wxyz = waypoints[0].wxyz.copy()
     stops = corner_stops(waypoints)
-    positions, quats, speed, stop, owner = [], [], [], [], []
-    waypoint_samples = [0] * len(waypoints)
     for k in range(len(waypoints) - 1):
         if np.linalg.norm(waypoints[k + 1].position - waypoints[k].position) < 1e-6 and angle_between_wxyz(
             waypoints[k].wxyz, waypoints[k + 1].wxyz
         ) < 1e-6:
             raise PathError(f"segment {k + 1} has zero length (waypoints {k + 1} and {k + 2} are equal)", segments=[k])
-        points, qs = segment_points(waypoints, k, step)
+    pieces = segment_pieces(waypoints, step)
+    positions, quats, speed, stop, owner = [], [], [], [], []
+    waypoint_samples = [0] * len(waypoints)
+    for k in range(len(waypoints) - 1):
+        points, qs = pieces[k]
         first = 0 if k == 0 else 1
         if k > 0 and (stops[k] or waypoints[k].dwell > 0.0):
             stop[-1] = True  # corner, or a rest at the waypoint
@@ -436,6 +600,18 @@ class PathIk:
             q = pin.integrate(self.model, q, step)
         return q[self.q_index].copy(), error
 
+    @staticmethod
+    def reach_hint(q: np.ndarray, position: np.ndarray) -> str:
+        """Why a pose is not reachable, from the closest configuration q the IK
+        found (an operator hint, UR-like arm)."""
+        if abs(math.sin(q[2])) < 0.1:
+            return " (arm fully stretched, j3 ≈ 0°)"
+        if abs(math.sin(q[4])) < 0.1:
+            return " (wrist singularity, j5 ≈ 0°)"
+        if np.linalg.norm(np.asarray(position)[:2]) < 0.35:
+            return " (too close to the robot's base axis)"
+        return ""
+
     def follow(self, path: SampledPath, seed: np.ndarray, max_step_rad: float = 0.25) -> np.ndarray:
         """Joint positions for every sample. Raises PathError at the first
         unreachable sample or configuration jump."""
@@ -446,15 +622,18 @@ class PathIk:
             q_new, error = self.solve(target, q)
             if error > 1e-4:
                 raise PathError(
-                    f"pose not reachable at {100.0 * k / max(1, len(path.positions) - 1):.0f} % of the path",
+                    f"pose out of the robot's reach{self.reach_hint(q_new, p)}"
+                    f" at {100.0 * k / max(1, len(path.positions) - 1):.0f} % of the path",
                     segments=[int(path.segment[k])],
                     fraction=k / max(1, len(path.positions) - 1),
+                    position=p,
                 )
             if k > 0 and np.max(np.abs(q_new - q)) > max_step_rad:
                 raise PathError(
                     f"joint configuration jump (singularity) at {100.0 * k / (len(path.positions) - 1):.0f} % of the path",
                     segments=[int(path.segment[k])],
                     fraction=k / max(1, len(path.positions) - 1),
+                    position=p,
                 )
             result[k] = q_new
             q = q_new
@@ -672,20 +851,24 @@ def parameterize_path(
     # The curvature term is only estimated above: slow down only where the
     # exact spline exceeds a limit (a uniform slowdown would penalize the
     # whole path for one tight spot).
-    local_iterations = 0
-    for local_iterations in range(1, 16):
-        times, v = timing(v_lim)
-        traj = _spline_resample(times, q, dt)
-        ratio_v = np.max(np.abs(traj.velocities) / qd_max, axis=1)
-        ratio_a = np.max(np.abs(traj.accelerations) / qdd_max, axis=1)
-        factor = np.minimum(1.0 / np.maximum(ratio_v, 1e-9), 1.0 / np.sqrt(np.maximum(ratio_a, 1e-9)))
-        bad = np.where(factor < 1.0)[0]
-        if len(bad) == 0:
-            break
-        path_index = np.clip(np.searchsorted(times, traj.times[bad]), 0, len(v_lim) - 1)
-        for k, f in zip(path_index, factor[bad]):
-            lo, hi = max(0, k - window), min(len(v_lim), k + window + 1)
-            v_lim[lo:hi] = np.minimum(v_lim[lo:hi], v[lo:hi] * f * 0.95)
+    def local_slowdown(v_lim: np.ndarray) -> int:
+        iterations = 0
+        for iterations in range(1, 16):
+            times, v = timing(v_lim)
+            traj = _spline_resample(times, q, dt)
+            ratio_v = np.max(np.abs(traj.velocities) / qd_max, axis=1)
+            ratio_a = np.max(np.abs(traj.accelerations) / qdd_max, axis=1)
+            factor = np.minimum(1.0 / np.maximum(ratio_v, 1e-9), 1.0 / np.sqrt(np.maximum(ratio_a, 1e-9)))
+            bad = np.where(factor < 1.0)[0]
+            if len(bad) == 0:
+                break
+            path_index = np.clip(np.searchsorted(times, traj.times[bad]), 0, len(v_lim) - 1)
+            for k, f in zip(path_index, factor[bad]):
+                lo, hi = max(0, k - window), min(len(v_lim), k + window + 1)
+                v_lim[lo:hi] = np.minimum(v_lim[lo:hi], v[lo:hi] * f * 0.95)
+        return iterations
+
+    local_iterations = local_slowdown(v_lim)
 
     bounds = _segment_bounds(np.asarray(segment)) if segment is not None else []
     times, v = timing(v_lim)
@@ -696,9 +879,17 @@ def parameterize_path(
     if bounds and durations:
         base = v_lim.copy()
         caps = np.full(len(bounds), np.inf)
-        wanted = [
-            (k, float(d)) for k, d in enumerate(durations[: len(bounds)]) if d is not None and d > fastest[k] * 1.001
-        ]
+        # A duration may come with a speed (drawn strokes): the time is then
+        # between the drawn one (speed 0) and the fastest (speed 1).
+        targets = []
+        for k, d in enumerate(durations[: len(bounds)]):
+            speed = None
+            if isinstance(d, (tuple, list)):
+                d, speed = d
+            if d is not None and speed is not None and d > fastest[k]:
+                d = d - float(speed) * (d - fastest[k])
+            targets.append(d)
+        wanted = [(k, float(d)) for k, d in enumerate(targets) if d is not None and d > fastest[k] * 1.001]
         for _ in range(2 if len(wanted) > 1 else 1):
             for k, target in wanted:
                 a, b = bounds[k]
@@ -719,6 +910,9 @@ def parameterize_path(
         for j, (a2, b2) in enumerate(bounds):
             if np.isfinite(caps[j]):
                 v_lim[a2 : b2 + 1] = np.minimum(v_lim[a2 : b2 + 1], caps[j])
+        # A capped segment changes speed abruptly at its ends: settle that
+        # locally too, instead of slowing the whole path down uniformly.
+        local_iterations += local_slowdown(v_lim)
         times, v = timing(v_lim)
     traj = fit_to_limits(times, q, qd_max, qdd_max, dt)
     scale = traj.info.get("time_scale", 1.0)
@@ -910,11 +1104,12 @@ def recording_to_path(
 
 
 def poses_to_path(
-    times: np.ndarray, positions: np.ndarray, quats: np.ndarray, position_tol: float = 0.003, max_waypoints: int = 3000
+    times: np.ndarray, positions: np.ndarray, quats: np.ndarray, position_tol: float = 0.003, max_waypoints: int = 3000,
+    rotation_tol: float = math.radians(2.0),
 ) -> tuple[list[Waypoint], list[Segment]]:
     """Timed TCP poses -> curve waypoints and segments with their durations
     (see recording_to_path)."""
-    keep = simplify_poses(positions, quats, position_tol)
+    keep = simplify_poses(positions, quats, position_tol, rotation_tol)
 
     def build(keep: list[int]) -> list[Waypoint]:
         points = positions[keep]
@@ -942,7 +1137,7 @@ def poses_to_path(
         if not splits or len(keep) + len(splits) > max_waypoints:
             break
         keep = sorted(set(keep) | set(splits))
-    segments = [Segment(float(times[keep[n + 1]] - times[keep[n]])) for n in range(len(keep) - 1)]
+    segments = [Segment(float(times[keep[n + 1]] - times[keep[n]]), "recorded") for n in range(len(keep) - 1)]
     return waypoints, segments
 
 
@@ -957,6 +1152,7 @@ def drawing_to_path(
     quats: np.ndarray,
     dwell_min_s: float = DRAWING_DWELL_MIN_S,
     position_tol: float = 0.003,
+    rotation_tol: float = math.radians(2.0),
 ) -> tuple[list[Waypoint], list[Segment]]:
     """Gizmo motion drawn while it was held (servo view) -> waypoints and
     segments. Holding the gizmo still for dwell_min_s or longer is a stop: a
@@ -989,7 +1185,11 @@ def drawing_to_path(
     cursor = 0
     for a, b in stills + [(n - 1, n - 1)]:
         if a > cursor and any(not still(cursor, k) for k in range(cursor + 1, a + 1)):
-            piece_wps, piece_segs = poses_to_path(times[cursor:a + 1], positions[cursor:a + 1], quats[cursor:a + 1], position_tol)
+            piece_wps, piece_segs = poses_to_path(
+                times[cursor:a + 1], positions[cursor:a + 1], quats[cursor:a + 1], position_tol, rotation_tol=rotation_tol
+            )
+            for segment in piece_segs:
+                segment.origin = "drawn"
             waypoints += piece_wps[1:]
             segments += piece_segs
         if b > a:
@@ -1008,7 +1208,7 @@ def drawing_to_path(
             del waypoints[k]
             del segments[k - 1]
             if k - 1 < len(segments) and segments[k - 1].duration is not None:
-                segments[k - 1] = Segment(segments[k - 1].duration + pause)
+                segments[k - 1] = Segment(segments[k - 1].duration + pause, segments[k - 1].origin)
         else:
             k += 1
     return waypoints, segments
@@ -1061,9 +1261,10 @@ def recording_payload(
 
 
 def path_payload(
-    name: str, waypoints: list[Waypoint], segments: list[Segment], look_at: np.ndarray | None = None
+    name: str, waypoints: list[Waypoint], segments: list[Segment], look_at: np.ndarray | None = None,
+    strokes: dict | None = None,
 ) -> dict:
-    return {
+    payload = {
         "format": PATH_FORMAT,
         "version": 3,
         "name": name,
@@ -1076,6 +1277,11 @@ def path_payload(
         # null: the waypoints' own orientations.
         "look_at_m": None if look_at is None else [float(v) for v in look_at],
     }
+    if strokes:
+        # Drawn strokes (servo view): the drawing's samples, filter tolerance
+        # and speed, so they can be tuned again after loading.
+        payload["strokes"] = strokes
+    return payload
 
 
 def look_at_from_payload(payload: dict) -> np.ndarray | None:

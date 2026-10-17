@@ -361,3 +361,76 @@ def test_drawing_becomes_curve_waypoints_with_a_stop_where_the_gizmo_was_held():
     # Released and grabbed again without moving: nothing to add.
     w, s = tt.drawing_to_path(times[:5] * 0.0 + np.arange(5) * dt, np.repeat(pos1[:1], 5, axis=0), quats[:5])
     assert len(w) == 1 and not s
+
+
+def test_blend_rounds_the_corner_without_a_stop():
+    sharp = l_path()  # 0.2 m along y, then 0.2 m along x: a 90 degree corner
+    blended = [w.copy() for w in sharp]
+    blended[1].blend = 0.05
+    corner = np.array([0.5, 0.0, 0.4])
+    path_sharp, path = tt.sample_path(sharp), tt.sample_path(blended)
+    assert path_sharp.stop[path_sharp.waypoint_samples[1]]
+    assert not np.any(path.stop[1:-1])  # passed without stopping
+    assert tt.blend_radius(blended, 1) == pytest.approx(0.05)
+    # Quadratic rounding with its control point at the corner: the middle is
+    # r/4 * |d_out - d_in| = r * sqrt(2) / 4 from the corner.
+    middle = path.positions[path.waypoint_samples[1]]
+    assert np.linalg.norm(middle - corner) == pytest.approx(0.05 * math.sqrt(2) / 4, rel=0.05)
+    assert np.min(np.linalg.norm(path.positions - corner, axis=1)) == pytest.approx(0.05 * math.sqrt(2) / 4, rel=0.05)
+    # Leaves the first segment 50 mm before the corner, tangentially.
+    assert max_turn_deg(path.positions) < 5.0
+    assert path.length[-1] < path_sharp.length[-1]
+    assert set(path.segment[: path.waypoint_samples[1] + 1].tolist()) == {0}
+    # No nearly equal neighbours at the cuts (they made the curvature limit collapse).
+    assert np.min(np.diff(path.length)) > 0.4 * tt.DEFAULT_STEP_M
+    # Limited to half the shorter neighbouring segment.
+    blended[1].blend = 1.0
+    assert tt.blend_radius(blended, 1) == pytest.approx(0.1)
+    assert tt.Waypoint.from_dict(blended[1].to_dict()).blend == 1.0
+    # With a stop the robot rests at the middle of the rounding.
+    blended[1].blend, blended[1].dwell = 0.05, 1.0
+    stopping = tt.sample_path(blended)
+    k = stopping.waypoint_samples[1]
+    assert stopping.stop[k] and np.linalg.norm(stopping.positions[k] - corner) == pytest.approx(0.05 * math.sqrt(2) / 4, rel=0.05)
+
+
+def test_neighbouring_blends_may_meet():
+    # A zig-zag of 0.2 m segments, both inner corners at the maximum radius:
+    # the roundings meet in the middle of the second segment.
+    waypoints = [wp(0.5, -0.2, 0.4), wp(0.5, 0.0, 0.4), wp(0.7, 0.0, 0.4), wp(0.7, 0.2, 0.4)]
+    for k in (1, 2):
+        waypoints[k].blend = 1.0
+    assert tt.blend_radius(waypoints, 1) == pytest.approx(0.1) and tt.blend_radius(waypoints, 2) == pytest.approx(0.1)
+    path = tt.sample_path(waypoints)
+    assert not np.any(path.stop[1:-1])
+    assert np.min(np.diff(path.length)) > 0.2 * tt.DEFAULT_STEP_M
+    assert max_turn_deg(path.positions) < 5.0
+
+
+def test_drawn_speed_mixes_the_drawn_and_the_fastest_time():
+    s = np.linspace(0.0, 0.5, 200)
+    q = np.outer(s, np.array([1.0, -0.5, 0.8, 0.0, 0.3, 1.2]))
+    stops = np.zeros(len(s), dtype=bool)
+    stops[[0, -1]] = True
+    segment = np.zeros(len(s), dtype=int)
+    fastest = tt.parameterize_path(q, s, np.full(len(s), np.inf), stops, QD, QDD, 0.004, segment).segment_fastest_s[0]
+    drawn = 3.0 * fastest
+    for speed, expected in ((0.0, drawn), (0.5, 0.5 * (drawn + fastest)), (1.0, fastest)):
+        t = tt.parameterize_path(q, s, np.full(len(s), np.inf), stops, QD, QDD, 0.004, segment, [(drawn, speed)])
+        assert t.segment_planned_s[0] == pytest.approx(expected, rel=0.03)
+    assert tt.Segment.from_dict(tt.Segment(drawn, "drawn", 3, 0.4).to_dict()).request() == (drawn, 0.4)
+
+
+def test_unreachable_pose_reports_where_and_why(path_ik):
+    home = np.radians([0, -90, 90, -90, -90, 0])
+    start = path_ik.fk(home)
+    rot = tt.matrix_to_quat_wxyz(start.rotation)
+    p0 = start.translation
+    far = p0 + 3.0 * p0 / np.linalg.norm(p0)  # beyond the arm's reach
+    path = tt.sample_path([tt.Waypoint(p0, rot), tt.Waypoint(far, rot)], 0.002)
+    with pytest.raises(tt.PathError) as error:
+        path_ik.follow(path, home)
+    assert "out of the robot's reach" in str(error.value) and "stretched" in str(error.value)
+    assert error.value.segments == [0]
+    reached = np.linalg.norm(np.asarray(error.value.position) - p0)
+    assert 0.0 < reached < np.linalg.norm(far - p0)

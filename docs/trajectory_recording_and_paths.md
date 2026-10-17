@@ -116,11 +116,11 @@ The editor has two modes, shown as two check boxes in one row
 |---|---|
 | **New Trajectory** (top of the folder) | starts a path at the robot's current TCP (waypoint 1), puts the TCP gizmo there and switches to *Draw* |
 | green line (Draw) | the next segment: from the last waypoint to the TCP gizmo; checked every 0.3 s while the gizmo moves and turns **red** when that pose cannot be reached from the last waypoint, before Confirm |
-| summary line | one line: ✅ planned and executable · ❌ cannot be executed (the reason is in the top-left window) · ⏳ planning · ⚪ not planned yet; then waypoints, segments, curves (if any), length and (when planned) the path time incl. stops |
+| summary | two lines (the controls below never move): ✅ planned and executable · ❌ cannot be executed (the reason is in the top-left window) · ⏳ planning · ⚪ not planned yet; then waypoints, segments, curves (if any), length and (when planned) the path time incl. stops |
 | **Confirm Waypoint** | adds the TCP gizmo pose as the next waypoint (shown in Draw only) |
 | Edit: **Undo** / **Redo** | edit history (100 steps) |
 | TCP gizmo rule | after **Undo**, **Redo** and **Delete Waypoint** the gizmo goes to the last waypoint (the end of the path), where drawing continues; after **Load** too, except in servo mode (a loaded path can end far from the robot). In servo mode the robot follows the gizmo |
-| Edit: **Clear** | removes the path **and the current plan** (planned path line, preview, plan in the planner) |
+| **Clear Trajectory** (below New Trajectory) | removes the path **and the current plan** (planned path line, preview, plan in the planner); Undo brings the path back |
 | *Gizmo axes* **☐ base_link / ☑ tool** | axes of the trajectory gizmo (the servo gizmo has its own setting); both move and rotate, only the axes differ: `base_link` = the gizmo (trajectory gizmo in Draw, waypoint gizmo in Edit) rests at the base axes, a ring turns the pose about that base axis and the gizmo returns to the base axes after release; `tool` = the pose's own axes. Hidden while point tracking is on (base_link axes, no rotation; a moved waypoint then turns toward the point) |
 | *Orientation* **Look at point** | turns the tool z axis of the trajectory gizmo (Draw) or of the selected waypoint (Edit) toward the red point of *Point tracking* (default −3000, 0, 0 mm), by the smallest rotation; also when tracking is off. The path is planned with the waypoints' own orientations (interpolated between them); files from the earlier "path looks at the point" version load with the orientations they had along that path |
 | **Plan continuously** (off by default) | on: what is chosen (path, segments) is planned 0.4 s after every change and again when the robot comes to rest elsewhere, and the preview repeats; off: the plan and its preview are removed **at once** after a change, then only a check runs (red segments, fastest times) until **Plan** |
@@ -128,8 +128,8 @@ The editor has two modes, shown as two check boxes in one row
 | *Speed* (0.05–1) | execution speed of every plan: the planner divides all times by it (0.5 = twice as long; velocities × 0.5, accelerations × 0.25) and publishes a waiting plan again when it changes; the preview shows exactly that trajectory |
 | **Plan** | plans approach + path (or the chosen segments) now; the plan line in the top-left window says what is planned (`Planned: path 1→6 · 6.60 s (approach 0.92 s)`, `… · speed 0.50`); the preview plays it once |
 | **Execute** | right below Plan: runs the plan |
-| *Waypoint* folder | `gizmo` (Draw: the gizmo's pose, a `gizmo` row in the table) or a waypoint number (switches to *Edit*; also by clicking its sphere): its pose in `base_link` (mm, FAIRINO rx/ry/rz °), **Stop [s]** (rest at that waypoint, not at the first/last), **Straight**, **Delete Waypoint**; **Move [mm]** / **Rotate [deg]** + *Frame* (`base_link`, or `local` = the gizmo's / waypoint's own axes) + **Apply Offset** moves the gizmo (Draw) or the waypoint (Edit) by exactly that amount; table of all waypoints (⏸ = stop) |
-| *Segments* | one time field per segment, all at once (25 per page, *Show* picks the page for longer paths); each label gives the **fastest** possible time on one line (`2→3 ≥0.31s`, `❌` = cannot be executed, `…` = not checked yet; waypoints are numbered from 1); enter a longer time to slow the segment down, 0 = as fast as possible; a time below the fastest is listed and the fastest is used. Editing a field highlights that segment |
+| *Waypoint* folder | `gizmo` (Draw: the gizmo's pose, a `gizmo` row in the table) or a waypoint number (switches to *Edit*; also by clicking its sphere): its pose in `base_link` (mm, FAIRINO rx/ry/rz °), **Stop [s]** (rest at that waypoint, not at the first/last), **Blend [mm]** (corner blend radius, below), **Straight**, **Delete Waypoint**; **Move [mm]** / **Rotate [deg]** + *Frame* (`base_link`, or `local` = the gizmo's / waypoint's own axes) + **Apply Offset** moves the gizmo (Draw) or the waypoint (Edit) by exactly that amount; table of the shown waypoints (40 per page, *Rows*): x, y, z [mm], stop [s], R [mm] (blend radius) |
+| *Segments* | a table of all segments (a drawn stroke is one row, its speed is set in the servo view), 40 rows per page (*Rows*): segment, how it was made (`—` line, `∿` curve, `✍` drawn in the servo view, `⏺` from a recording), fastest and set time [s] (⚠ = below the fastest: executed as fast as possible, drawn red); pick a segment in *Segment* and set *Time [s]* (0 = as fast as possible) |
 | Files view › *Path files*: **Save** / **Load** / **Refresh** | `paths/<name>.json` (`format: fairino_path`, version 3; older files load as straight segments); Load switches to the trajectory view |
 
 ### Curves, as in the FAIRINO Viser prototype
@@ -163,7 +163,9 @@ matches the drawing. The plan, its preview and the only **Execute** button
 are in the *Plan & Execute* folder of the trajectory view.
 
 Colours: green = path segments and the segment being drawn, red = a segment
-(or the segment being drawn) that cannot be executed, yellow = selected
+(or the segment being drawn) that cannot be executed, with a red sphere
+*✕ fails here* where it fails, grey = not checked because the path fails
+elsewhere, yellow = selected
 segment/waypoint, cyan = tangent handles, blue (thin) = the planned TCP
 trajectory including the approach (the move from where the robot is to the
 start of the path; drawn from the planned trajectory every ~2 mm of TCP
@@ -188,6 +190,29 @@ Stops: a waypoint with *Stop [s]* > 0 is a stop sample (the robot is at
 rest there) and the planner inserts the rest after timing (`insert_dwells`);
 the speed scales it like every other time. Not at the first or last waypoint
 of what is planned. File key `dwell_s` per waypoint.
+
+Corner blend radius (as UR's blend radius or ABB's zone): a straight
+waypoint between two segments with a change of direction normally is a stop.
+With *Blend [mm]* > 0 (or the blend handle: in *Edit* a third small gizmo on
+the inner bisector of the corner with one arrow along it, labelled `R … mm`;
+its distance from the waypoint is the radius, closer than 20 mm = no blend) the path leaves the
+incoming segment that far before the waypoint and joins the outgoing one as
+far after it, along a cubic Bezier tangent to both (for straight segments the
+quadratic one with its control point at the corner, whose middle passes
+r·|d_out − d_in|/4 from the waypoint), and the robot passes without
+stopping. The orientation continues the one of the sharp corner (incoming
+segment up to the middle, then the outgoing one), so the turning rate has no
+step. Each half of the rounding belongs to the segment on its side: segment
+times, waypoint arrival times and *Segments* plans meet at the middle of the
+rounding. The radius is limited to half the shorter neighbouring segment
+(neighbouring roundings meet at most) and has no effect at curve waypoints
+or without a corner; with *Stop [s]* the robot rests at the middle of the
+rounding. File key `blend_m` per waypoint. Measured on
+the operator's 22-waypoint path, corner of 76° at waypoint 3: segments 2 → 4
+take 1.97 s sharp, 1.84 s with 50 mm, 2.02 s with 100 mm, 2.23 s with 200 mm
+(the longer rounding is passed at the speed the joint accelerations allow
+on that curve, about 0.4–0.6 m/s; a stop costs less than that there), whole
+path 12.60 → 12.48 s with 50 mm, executed 0.6 mm from the plan.
 
 Tuning one part: *Plan* **Segments**, *From waypoint* 4, *To waypoint* 5,
 **Plan**, **Execute**: the robot makes a free approach to waypoint 4 and runs
@@ -257,6 +282,7 @@ Cartesian path:
    fails, the part starts from the configuration nearest to the current one.
    Segment indices in the status stay those of the whole path
    (`first_segment` gives the first planned one).
+   Corners with a blend radius are rounded before (`segment_pieces`).
 3. Joint limits for every sample, self-collision every 5th sample.
 4. Timing (`parameterize_path`): velocity limit curve from the TCP maximum,
    the joint velocity limits and the curvature term, forward/backward

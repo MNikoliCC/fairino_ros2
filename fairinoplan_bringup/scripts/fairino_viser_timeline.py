@@ -451,10 +451,13 @@ class TrajectoryTimeline:
         shown = [key for key, _ in GROUPS if key in entry["shown"]]
         heights = _heights(shown)
         width = float(entry["size"] or 900)
-        entry["panel"].float(
-            x=MARGIN_PX, y=-MARGIN_PX, width=width,
-            height=float(HEADER_PX + sum(heights[k] + LEGEND_PX[k] for k in shown)),
-        )
+        # Placed only when its width changes: a placement command re-places
+        # (and re-opens) the panel, so new plans must not send one. No pinned
+        # height: the panel follows its content (charts shown or minimized)
+        # and stays anchored to the bottom.
+        if entry.get("placed_width") != width:
+            entry["placed_width"] = width
+            entry["panel"].float(x=MARGIN_PX, y=-MARGIN_PX, width=width)
         with self._lock:
             state, charts = self._state, self._charts
         for key, plot in entry["plots"].items():
@@ -469,14 +472,19 @@ class TrajectoryTimeline:
                 plot.visible = visible
 
     # ---------------------------------------------------------------- data
-    def set_plan(self, plan: Motion | None, waypoint_times: list[float], title: str, first_waypoint: int = 1) -> None:
+    def set_plan(
+        self, plan: Motion | None, waypoint_times: list[float], title: str, first_waypoint: int = 1,
+        labels: list[str] | None = None,
+    ) -> None:
         """The plan waiting for Execute (None: nothing planned); a measured
-        motion of an earlier execution is dropped."""
+        motion of an earlier execution is dropped. labels: the waypoints'
+        numbers (default first_waypoint, first_waypoint + 1, ...)."""
         if plan is None:
             self._publish(_State())
             return
         end = float(plan.times[-1]) + 1e-6
-        numbered = [(float(t), str(first_waypoint + k)) for k, t in enumerate(waypoint_times) if 0.0 <= t <= end]
+        labels = labels if labels is not None else [str(first_waypoint + k) for k in range(len(waypoint_times))]
+        numbered = [(float(t), label) for t, label in zip(waypoint_times, labels) if 0.0 <= t <= end]
         self._publish(_State(plan, None, [t for t, _ in numbered], [n for _, n in numbered], title))
 
     def set_measured(self, measured: Motion, note: str) -> None:

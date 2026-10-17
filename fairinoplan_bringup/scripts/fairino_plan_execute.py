@@ -876,7 +876,8 @@ class FairinoPlanExecute(Node):
         except PathError as e:
             self.get_logger().error(f"{kind} failed: {e}")
             self._publish_status(
-                "failed", f"{kind}: {e}", kind=kind, failed_segments=list(e.segments), fraction=e.fraction
+                "failed", f"{kind}: {e}", kind=kind, failed_segments=list(e.segments), fraction=e.fraction,
+                failed_position_m=e.position,
             )
         except Exception as e:
             self.get_logger().error(f"{kind} failed: {e}")
@@ -935,7 +936,7 @@ class FairinoPlanExecute(Node):
             # from the configuration nearest to the current one.
             self.get_logger().warn(f"path before waypoint {first + 1}: {e}; the part starts from the current configuration")
             path_q = self._path_ik.follow(part, self._start_configuration(part, q_now))
-        self._check_path(path_q, part.segment)
+        self._check_path(path_q, part.segment, part.positions)
         return part, path_q, segments[first:last], first, waypoints[first:last + 1]
 
     def _start_configuration(self, sampled, q_now):
@@ -970,7 +971,11 @@ class FairinoPlanExecute(Node):
         seed.positions = q_now
         solution = JointConfiguration()
         if not self._ik.solveIk(goal, seed, solution):
-            raise PathError("the first waypoint is not reachable", segments=[int(sampled.segment[0])])
+            raise PathError(
+                "the first waypoint is out of the robot's reach",
+                segments=[int(sampled.segment[0])],
+                position=sampled.positions[0],
+            )
         return np.asarray(solution.positions, dtype=float)
 
     def _within_limits(self, q, q_ref):
@@ -998,7 +1003,7 @@ class FairinoPlanExecute(Node):
             self._qdd_max,
             self._path_dt,
             sampled.segment - first,
-            [s.duration for s in segments],
+            [s.request() for s in segments],
         )
         # Rests at waypoints (the robot stops there: stop sample); not at the
         # start or the end of what is planned.
@@ -1041,16 +1046,20 @@ class FairinoPlanExecute(Node):
             )
             result.update(ok=True, message="reachable", segment_fastest_s=[round(v, 3) for v in timed.segment_fastest_s])
         except PathError as e:
-            result.update(ok=False, message=str(e), failed_segments=list(e.segments))
+            result.update(ok=False, message=str(e), failed_segments=list(e.segments), failed_position_m=e.position)
         except Exception as e:
             result.update(ok=False, message=f"check failed: {e}", failed_segments=[])
         self._path_check_pub.publish(String(data=json.dumps(result)))
 
-    def _check_path(self, path_q, owner=None):
-        """Joint limits and self-collision; owner = segment index per sample."""
+    def _check_path(self, path_q, owner=None, positions=None):
+        """Joint limits and self-collision; owner = segment index per sample,
+        positions = its TCP position (where a failure is shown)."""
 
         def where(k):
             return [int(owner[k])] if owner is not None else []
+
+        def at(k):
+            return positions[k] if positions is not None else None
 
         margin = 1e-4
         bad = np.where(np.any((path_q < self._q_lower - margin) | (path_q > self._q_upper + margin), axis=1))[0]
@@ -1061,6 +1070,7 @@ class FairinoPlanExecute(Node):
                 f"{self._joint_names[joint]} outside its limits at {100.0 * k / (len(path_q) - 1):.0f} % of the path",
                 segments=where(k),
                 fraction=k / (len(path_q) - 1),
+                position=at(k),
             )
         for k in range(0, len(path_q), 5):
             full = self._scene.toFullJointPositions(self._joint_group, path_q[k])
@@ -1069,6 +1079,7 @@ class FairinoPlanExecute(Node):
                     f"self-collision at {100.0 * k / (len(path_q) - 1):.0f} % of the path",
                     segments=where(k),
                     fraction=k / (len(path_q) - 1),
+                    position=at(k),
                 )
 
     # =================================================================
