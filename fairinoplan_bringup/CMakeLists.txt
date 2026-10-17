@@ -23,6 +23,7 @@ install(
   FILES
     scripts/fairino_trajectory_tools.py
     scripts/fairino_viser_trajectories.py
+    scripts/fairino_viser_gizmo.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

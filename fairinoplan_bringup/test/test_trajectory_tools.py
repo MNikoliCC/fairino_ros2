@@ -66,6 +66,24 @@ def test_zero_length_segment_is_reported():
     assert error.value.segments == [0]
 
 
+def test_part_of_a_path_keeps_the_whole_path_samples_and_stops_at_its_ends():
+    waypoints = l_path() + [wp(0.7, 0.2, 0.4)]
+    for k in (1, 2):
+        waypoints[k].curve = True
+        waypoints[k].tangent = tt.default_tangent(waypoints, k)
+    whole = tt.sample_path(waypoints)
+    assert tt.path_part({}, 4) == (0, 3)
+    assert tt.path_part({"part": [1, 2]}, 4) == (1, 2)
+    assert tt.path_part({"part": [3, 3]}, 4) == (2, 3)  # at least one segment
+    part = tt.slice_path(whole, 1, 2)
+    a, b = whole.waypoint_samples[1], whole.waypoint_samples[2]
+    assert np.allclose(part.positions, whole.positions[a:b + 1])
+    assert not whole.stop[a] and not whole.stop[b]  # passed without a stop in the whole path
+    assert part.stop[0] and part.stop[-1] and not np.any(part.stop[1:-1])
+    assert part.length[0] == 0.0 and part.length[-1] == pytest.approx(whole.length[b] - whole.length[a])
+    assert part.waypoint_samples == [0, b - a]
+    assert set(part.segment.tolist()) == {1}  # segment indices of the whole path
+
 def test_orientation_is_interpolated_with_smooth_ends():
     end = tt.matrix_to_quat_wxyz(pin.rpy.rpyToMatrix(math.pi, 0.0, 0.5))
     path = tt.sample_path([wp(0.5, 0.0, 0.4), wp(0.6, 0.0, 0.4, end)])
@@ -299,3 +317,47 @@ def test_sampled_path_looks_at_the_point_and_round_trips(tmp_path):
     assert tt.look_at_from_payload(tt.path_payload("p", waypoints, [tt.Segment()] * 2)) is None
     with pytest.raises(tt.PathError):
         tt.sample_path(waypoints, 0.002, look_at=np.array([0.6, 0.1, 0.5]))  # on the path
+
+
+def test_dwell_rests_at_the_waypoint_and_round_trips():
+    waypoints = [wp(0.5, -0.2, 0.4), wp(0.5, 0.0, 0.4), wp(0.5, 0.2, 0.4)]  # collinear: no corner stop
+    waypoints[1].dwell = 1.5
+    path = tt.sample_path(waypoints)
+    assert path.stop[path.waypoint_samples[1]]
+    assert tt.Waypoint.from_dict(waypoints[1].to_dict()).dwell == 1.5
+    q = np.zeros((len(path.positions), 6))
+    q[:, 0] = path.length  # a joint path that follows the path coordinate
+    traj = tt.parameterize_path(q, path.length, path.speed, path.stop, QD, QDD, 0.004, path.segment)
+    t_wp = traj.segment_planned_s[0]
+    rested = tt.insert_dwells(traj, [t_wp], [1.5], 0.004)
+    assert rested.times[-1] == pytest.approx(traj.times[-1] + 1.5, abs=1e-9)
+    assert np.all(np.diff(rested.times) > 0)
+    hold = (rested.times > t_wp + 0.01) & (rested.times < t_wp + 1.49)
+    assert np.ptp(rested.positions[hold, 0]) < 1e-9 and np.all(rested.velocities[hold] == 0.0)
+    assert rested.positions[-1, 0] == pytest.approx(traj.positions[-1, 0])
+
+
+def test_drawing_becomes_curve_waypoints_with_a_stop_where_the_gizmo_was_held():
+    dt = 0.02
+    t1 = np.arange(0.0, 1.0, dt)  # 0.2 m along x in 1 s
+    t2 = np.arange(1.0, 1.8, dt)  # held still 0.8 s
+    t3 = np.arange(1.8, 2.8, dt)  # quarter circle
+    pos1 = np.stack([0.5 + 0.2 * t1, np.zeros_like(t1), np.full_like(t1, 0.4)], axis=1)
+    pos2 = np.repeat([[0.7, 0.0, 0.4]], len(t2), axis=0)
+    a = (t3 - 1.8) * (np.pi / 2)
+    pos3 = np.stack([0.7 + 0.1 * np.sin(a), 0.1 - 0.1 * np.cos(a), np.full_like(a, 0.4)], axis=1)
+    times = np.concatenate([t1, t2, t3])
+    positions = np.vstack([pos1, pos2, pos3])
+    quats = np.repeat([DOWN], len(times), axis=0)
+    waypoints, segments = tt.drawing_to_path(times, positions, quats)
+    assert len(segments) == len(waypoints) - 1
+    assert np.allclose(waypoints[0].position, pos1[0])
+    stops = [w for w in waypoints if w.dwell > 0]
+    assert len(stops) == 1 and stops[0].dwell == pytest.approx(0.78, abs=0.03)
+    assert np.linalg.norm(stops[0].position - [0.7, 0.0, 0.4]) < 0.002
+    assert np.linalg.norm(waypoints[-1].position - pos3[-1]) < 1e-9
+    assert sum(s.duration for s in segments) == pytest.approx(2.8 - dt - 0.78, abs=0.05)  # motion only
+    tt.sample_path(waypoints)  # a valid path (no zero-length segment)
+    # Released and grabbed again without moving: nothing to add.
+    w, s = tt.drawing_to_path(times[:5] * 0.0 + np.arange(5) * dt, np.repeat(pos1[:1], 5, axis=0), quats[:5])
+    assert len(w) == 1 and not s

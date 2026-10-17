@@ -26,8 +26,8 @@ servo path. The RoboPlan self-collision barrier is a separate, optional phase
 Browser ── Viser WebSocket ── fairino_viser_ui.py (Python)
                                  ├─ robot from /joint_states at 30 Hz (Pinocchio ViserVisualizer, same URDF as RoboPlan)
                                  ├─ 6-DoF transform-controls gizmo on the TCP (frame flange)
-                                 ├─ translucent plan preview robot
-                                 ├─ Enable/Hold/Disable/Reset Target/Plan/Execute/Recover/Reset Fault/mode
+                                 ├─ translucent plan preview robot (plays each plan once, real time)
+                                 ├─ views Servo/Trajectory/Files (mode), Hold, Plan & Execute, Home, Recover/Reset Fault
                                  └─ status, speed, safety-speed and audit panels
         /fairino_servo/target_pose (PoseStamped, base_link)        /fairino_servo/* services
                                  ▼
@@ -253,6 +253,7 @@ and OInK keep tracking the last valid target.
 | `/fairinoplan/path_goal` | `std_msgs/String` (JSON: `joint_path` or `cartesian_path`) | UI → planner ([trajectory_recording_and_paths.md](trajectory_recording_and_paths.md)) |
 | `/fairinoplan/path_check` → `/fairinoplan/path_check_result` | `std_msgs/String` (JSON) | UI ↔ planner: reachability and fastest time per segment while drawing; no plan is made |
 | `/fairinoplan/status` | `std_msgs/String` (JSON), latched | planner → UI |
+| `/fairinoplan/speed_scale` | `std_msgs/Float64` (0.05–1), latched | UI → planner: execution speed; every plan is published and executed with its times divided by it, a waiting plan is published again when it changes |
 | `/fairinoplan/planned_path` | `trajectory_msgs/JointTrajectory`, latched | planner → UI (drawn in Viser) |
 
 ### Services
@@ -320,7 +321,9 @@ has finished.
 limiter state: OInK decelerates towards the new target (the current TCP) at
 the acceleration limit instead of stopping the reference. Reset Target is
 refused while SYNCING or RECOVERING, and synchronization requests are
-serialized (the worker and the service never share a request slot).
+serialized (the worker and the service never share a request slot). The UI
+has no Reset Target button any more (its gizmo is put on the TCP on every
+enable/resume); the service `/fairino_servo/reset_target` remains for scripts.
 
 **Hardware streaming supervision**: in ACTIVE and HOLD the servo requires
 streaming `ARMED`; anything else (an external `/fairino_robot/stop`, a manual

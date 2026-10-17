@@ -117,6 +117,7 @@ class Waypoint:
     wxyz: np.ndarray
     curve: bool = False
     tangent: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    dwell: float = 0.0  # rest at this waypoint [s] (between two segments)
 
     def to_dict(self) -> dict:
         return {
@@ -125,6 +126,7 @@ class Waypoint:
             "fairino_pose": pose_to_fairino(self.position, self.wxyz),
             "curve": bool(self.curve),
             "tangent_m": [float(v) for v in self.tangent],
+            "dwell_s": float(self.dwell),
         }
 
     @staticmethod
@@ -136,10 +138,11 @@ class Waypoint:
             wxyz / np.linalg.norm(wxyz),
             curve=bool(data.get("curve", False)) and np.linalg.norm(tangent) > 1e-9,
             tangent=tangent,
+            dwell=max(0.0, float(data.get("dwell_s") or 0.0)),
         )
 
     def copy(self) -> "Waypoint":
-        return Waypoint(self.position.copy(), self.wxyz.copy(), self.curve, self.tangent.copy())
+        return Waypoint(self.position.copy(), self.wxyz.copy(), self.curve, self.tangent.copy(), self.dwell)
 
 
 @dataclass
@@ -333,8 +336,8 @@ def sample_path(waypoints: list[Waypoint], step: float = DEFAULT_STEP_M, look_at
             raise PathError(f"segment {k + 1} has zero length (waypoints {k + 1} and {k + 2} are equal)", segments=[k])
         points, qs = segment_points(waypoints, k, step)
         first = 0 if k == 0 else 1
-        if k > 0 and stops[k]:
-            stop[-1] = True
+        if k > 0 and (stops[k] or waypoints[k].dwell > 0.0):
+            stop[-1] = True  # corner, or a rest at the waypoint
         for i in range(first, len(points)):
             positions.append(points[i])
             quats.append(qs[i])
@@ -357,6 +360,36 @@ def sample_path(waypoints: list[Waypoint], step: float = DEFAULT_STEP_M, look_at
     dr = np.array([angle_between_wxyz(qts[i], qts[i + 1]) for i in range(len(qts) - 1)])
     length = np.concatenate([[0.0], np.cumsum(np.sqrt(dp**2 + (ROTATION_LENGTH_M_PER_RAD * dr) ** 2))])
     return SampledPath(pos, qts, np.asarray(speed, dtype=float), stop_arr, np.asarray(owner), waypoint_samples, length)
+
+
+def path_part(payload: dict, waypoint_count: int) -> tuple[int, int]:
+    """Waypoint indices (first, last) a planner request covers: "part" or the
+    whole path."""
+    last = waypoint_count - 1
+    part = payload.get("part")
+    if not part:
+        return 0, last
+    first = int(np.clip(int(part[0]), 0, max(last - 1, 0)))
+    return first, int(np.clip(int(part[1]), first + 1, last))
+
+
+def slice_path(path: SampledPath, first: int, last: int) -> SampledPath:
+    """Samples from waypoint first to waypoint last (indices of the whole
+    path), at rest at both ends. Segment indices stay those of the whole path."""
+    a, b = path.waypoint_samples[first], path.waypoint_samples[last] + 1
+    stop = path.stop[a:b].copy()
+    stop[0] = stop[-1] = True
+    segment = path.segment[a:b].copy()
+    segment[0] = first  # the waypoint sample ends the previous segment
+    return SampledPath(
+        path.positions[a:b],
+        path.wxyz[a:b],
+        path.speed[a:b],
+        stop,
+        segment,
+        [i - a for i in path.waypoint_samples[first:last + 1]],
+        path.length[a:b] - path.length[a],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +728,38 @@ def parameterize_path(
     return traj
 
 
+def insert_dwells(traj: TimedTrajectory, at_times: list[float], dwells: list[float], dt: float) -> TimedTrajectory:
+    """Rests of dwells[i] seconds at at_times[i] (where the trajectory is at
+    rest, e.g. a waypoint with a stop): the motion after it starts later."""
+    pairs = sorted((float(t), float(d)) for t, d in zip(at_times, dwells) if d > 0.0)
+    if not pairs:
+        return traj
+    times, columns = traj.times, (traj.positions, traj.velocities, traj.accelerations)
+    out_t: list[np.ndarray] = []
+    out: list[list[np.ndarray]] = [[], [], []]
+    shift, last = 0.0, 0
+    for t_stop, dwell in pairs:
+        k = int(np.searchsorted(times, t_stop))
+        out_t.append(times[last:k] + shift)
+        for o, c in zip(out, columns):
+            o.append(c[last:k])
+        hold = np.arange(0.0, dwell, dt)
+        q = np.array([np.interp(t_stop, times, traj.positions[:, j]) for j in range(traj.positions.shape[1])])
+        out_t.append(t_stop + shift + hold)
+        out[0].append(np.repeat(q[None, :], len(hold), axis=0))
+        out[1].append(np.zeros((len(hold), q.size)))
+        out[2].append(np.zeros((len(hold), q.size)))
+        shift += dwell
+        last = k
+    out_t.append(times[last:] + shift)
+    for o, c in zip(out, columns):
+        o.append(c[last:])
+    return TimedTrajectory(
+        np.concatenate(out_t), *(np.vstack(o) for o in out), dict(traj.info),
+        list(traj.segment_fastest_s), list(traj.segment_planned_s),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Recordings -> waypoints
 # ---------------------------------------------------------------------------
@@ -840,6 +905,14 @@ def recording_to_path(
     positions = np.array([p for p, _ in poses])
     quats = np.array([q for _, q in poses])
     times = np.array([float(s["t"]) for s in samples])
+    return poses_to_path(times, positions, quats, position_tol, max_waypoints)
+
+
+def poses_to_path(
+    times: np.ndarray, positions: np.ndarray, quats: np.ndarray, position_tol: float = 0.003, max_waypoints: int = 3000
+) -> tuple[list[Waypoint], list[Segment]]:
+    """Timed TCP poses -> curve waypoints and segments with their durations
+    (see recording_to_path)."""
     keep = simplify_poses(positions, quats, position_tol)
 
     def build(keep: list[int]) -> list[Waypoint]:
@@ -869,6 +942,74 @@ def recording_to_path(
             break
         keep = sorted(set(keep) | set(splits))
     segments = [Segment(float(times[keep[n + 1]] - times[keep[n]])) for n in range(len(keep) - 1)]
+    return waypoints, segments
+
+
+DRAWING_DWELL_MIN_S = 0.5  # holding the gizmo still at least this long is a stop
+DRAWING_STILL_M = 0.001
+DRAWING_STILL_RAD = math.radians(1.0)
+
+
+def drawing_to_path(
+    times: np.ndarray,
+    positions: np.ndarray,
+    quats: np.ndarray,
+    dwell_min_s: float = DRAWING_DWELL_MIN_S,
+    position_tol: float = 0.003,
+) -> tuple[list[Waypoint], list[Segment]]:
+    """Gizmo motion drawn while it was held (servo view) -> waypoints and
+    segments. Holding the gizmo still for dwell_min_s or longer is a stop: a
+    waypoint with that rest (dwell). The moving parts become curve waypoints
+    with their drawn durations (poses_to_path). The first waypoint is the
+    first sample."""
+    times = np.asarray(times, dtype=float)
+    positions = np.asarray(positions, dtype=float)
+    quats = np.asarray(quats, dtype=float)
+    n = len(times)
+    if n == 0:
+        return [], []
+
+    def still(a: int, k: int) -> bool:
+        return (
+            np.linalg.norm(positions[k] - positions[a]) < DRAWING_STILL_M
+            and angle_between_wxyz(quats[a], quats[k]) < DRAWING_STILL_RAD
+        )
+
+    # Still intervals (first, last sample) lasting dwell_min_s or longer.
+    stills, a = [], 0
+    for k in range(1, n + 1):
+        if k < n and still(a, k):
+            continue
+        if times[k - 1] - times[a] >= dwell_min_s:
+            stills.append((a, k - 1))
+        a = k
+    waypoints = [Waypoint(positions[0].copy(), quats[0].copy())]
+    segments: list[Segment] = []
+    cursor = 0
+    for a, b in stills + [(n - 1, n - 1)]:
+        if a > cursor and any(not still(cursor, k) for k in range(cursor + 1, a + 1)):
+            piece_wps, piece_segs = poses_to_path(times[cursor:a + 1], positions[cursor:a + 1], quats[cursor:a + 1], position_tol)
+            waypoints += piece_wps[1:]
+            segments += piece_segs
+        if b > a:
+            waypoints[-1].dwell += float(times[b] - times[a])
+        cursor = b
+    # Equal neighbours (a short pause inside a moving part) would be a
+    # zero-length segment: merge them.
+    k = 1
+    while k < len(waypoints):
+        if (
+            np.linalg.norm(waypoints[k].position - waypoints[k - 1].position) < 1e-6
+            and angle_between_wxyz(waypoints[k].wxyz, waypoints[k - 1].wxyz) < 1e-6
+        ):
+            waypoints[k - 1].dwell += waypoints[k].dwell
+            pause = segments[k - 1].duration or 0.0
+            del waypoints[k]
+            del segments[k - 1]
+            if k - 1 < len(segments) and segments[k - 1].duration is not None:
+                segments[k - 1] = Segment(segments[k - 1].duration + pause)
+        else:
+            k += 1
     return waypoints, segments
 
 

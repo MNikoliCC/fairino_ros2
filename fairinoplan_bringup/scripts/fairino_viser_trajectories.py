@@ -97,40 +97,43 @@ class RecordingPanel:
         self._trail_points: list = []
 
     # ------------------------------------------------------------------ GUI
-    def build_gui(self, gui) -> None:
-        with gui.add_folder("Recording"):
-            self._name = gui.add_text("Name", "recording")
-            self._record_button = gui.add_button(
-                "Record", color="red", icon=viser.Icon.PLAYER_RECORD,
-                hint="Arms the recorder: it starts with the next motion (servo or Execute) and pauses when the robot stops",
-            )
-            self._stop_button = gui.add_button("Stop & Save", icon=viser.Icon.PLAYER_STOP)
-            self._discard_button = gui.add_button("Discard", icon=viser.Icon.TRASH)
-            self._status = gui.add_markdown("Idle.")
-        with gui.add_folder("Library"):
+    def build_controls(self, gui) -> None:
+        """Record ↔ Stop & Save (one button), shared by both views: a
+        recording continues across servo and executed motion."""
+        self._record_button = gui.add_button(
+            "Record", color="red", icon=viser.Icon.PLAYER_RECORD,
+            hint="Arms the recorder: it starts with the next motion (servo or Execute), pauses while the robot "
+            "rests and continues with the next motion, in either view",
+        )
+        self._status = gui.add_markdown("", visible=False)
+        self._discard_button = gui.add_button("Discard Recording", icon=viser.Icon.TRASH, visible=False)
+        self._record_button.on_click(lambda _: self._arm() if self._record_button.label == "Record" else self._stop_and_save())
+        self._discard_button.on_click(lambda _: self._discard())
+
+    def build_library(self, gui) -> list:
+        """Recordings folder (trajectory view): library, replay, edit as path."""
+        folder = gui.add_folder("Recordings", expand_by_default=False)
+        with folder:
+            self._name = gui.add_text("Name", "recording", hint="File name of the next Stop & Save")
             self._library = gui.add_dropdown("Recording", ["—"])
             # The orange TCP trail shows the loaded recording (and the one
             # being recorded); Unload removes both.
             self._library_buttons = gui.add_button_group("Files", ["Load", "Unload", "Refresh"])
             self._loaded_info = gui.add_markdown("No recording loaded.")
-        with gui.add_folder("Replay"):
-            self._timing = gui.add_dropdown("Timing", TIMING_LABELS, initial_value=TIMING_LABELS[0])
-            self._speed = gui.add_slider("Speed [%]", min=10, max=100, step=5, initial_value=100)
+            self._timing = gui.add_dropdown("Replay timing", TIMING_LABELS, initial_value=TIMING_LABELS[0])
             self._replay_button = gui.add_button(
-                "Plan Replay", icon=viser.Icon.ROUTE, hint="Approach + recorded motion; check the preview, then Execute"
+                "Plan Replay", icon=viser.Icon.ROUTE,
+                hint="Approach + recorded motion at the Speed of Plan & Execute; check the preview, then Execute",
             )
-        with gui.add_folder("Edit as path"):
             self._tolerance = gui.add_number("Simplify tolerance [mm]", 3.0, min=0.5, max=50.0, step=0.5)
             self._edit_button = gui.add_button(
-                "Edit as Path", icon=viser.Icon.PENCIL, hint="Turns the loaded recording into editable waypoints (Path tab)"
+                "Edit as Path", icon=viser.Icon.PENCIL, hint="Turns the loaded recording into editable waypoints (Path)"
             )
-        self._record_button.on_click(lambda _: self._arm())
-        self._stop_button.on_click(lambda _: self._stop_and_save())
-        self._discard_button.on_click(lambda _: self._discard())
         self._library_buttons.on_click(lambda e: self._library_action(e.target.value))
         self._replay_button.on_click(lambda _: self._plan_replay())
         self._edit_button.on_click(lambda _: self._edit_as_path())
         self._refresh_library()
+        return [folder]
 
     # ------------------------------------------------------------ recording
     def on_joint_state(self, stamp: float, q: np.ndarray) -> None:
@@ -286,12 +289,22 @@ class RecordingPanel:
         return f"{icon} **{text}**  \n{count} samples · {duration:.1f} s · {segments} segment(s)"
 
     def refresh(self, plan_mode: bool) -> None:
-        self._status.content = self.status_text()
         with self._lock:
             state = self._state
-        self._record_button.disabled = state != "idle"
-        self._stop_button.disabled = state == "idle"
-        self._discard_button.disabled = state == "idle"
+        active = state != "idle"
+        label, color, icon = (
+            ("Stop & Save Recording", "red", viser.Icon.PLAYER_STOP) if active else ("Record", "red", viser.Icon.PLAYER_RECORD)
+        )
+        if self._record_button.label != label:
+            self._record_button.label = label
+            self._record_button.icon = icon
+            self._record_button.color = color
+        for handle in (self._status, self._discard_button):
+            if handle.visible != active:
+                handle.visible = active
+        text = self.status_text()
+        if self._status.content != text:
+            self._status.content = text
         has_loaded = self._loaded is not None and len(self._loaded.get("samples", [])) > 1
         self._replay_button.disabled = not (plan_mode and has_loaded and state == "idle")
         self._edit_button.disabled = not has_loaded
@@ -328,6 +341,9 @@ class RecordingPanel:
         self._describe_loaded()
         self._draw_trail(force=True)
         self._ui.set_result(f"Load: {name}")
+
+    def loaded_name(self) -> str:
+        return Path(self._loaded_name).stem if self._loaded_name else "recording"
 
     def _describe_loaded(self) -> None:
         p = self._loaded
@@ -393,10 +409,10 @@ class RecordingPanel:
             "times": [float(s["t"]) for s in samples],
             "positions": [list(map(float, s["joint_positions"])) for s in samples],
             "timing": "original" if self._timing.value == TIMING_LABELS[0] else "optimal",
-            "speed_scale": float(self._speed.value) / 100.0,
         }
         self._ui.path_goal_pub.publish(String(data=json.dumps(request)))
-        self._ui.set_result(f"Plan Replay: {self._loaded_name} sent to the planner ({self._timing.value}, {self._speed.value:.0f} %)")
+        self._ui.set_result(f"Plan Replay: {self._loaded_name} sent to the planner ({self._timing.value})")
+        self._ui.show_view("trajectory")  # the plan and Execute are there
 
     def _edit_as_path(self) -> None:
         try:
@@ -406,7 +422,8 @@ class RecordingPanel:
             return
         name = Path(self._loaded_name).stem
         self._ui.path_editor.load_path(waypoints, segments, name)
-        self._ui.set_result(f"Edit as Path: {len(waypoints)} waypoints from {self._loaded_name} (Path tab)")
+        self._ui.set_result(f"Edit as Path: {len(waypoints)} waypoints from {self._loaded_name} (Path)")
+        self._ui.show_view("trajectory")
 
 
 # ===========================================================================
@@ -457,9 +474,23 @@ def gui_number(gui, label: str, value: float):
     return gui.add_number(label, value, min=0.0, max=600.0, step=0.1, hint="Time of this segment [s]; 0 = as fast as possible")
 
 
+def _scope_options(scope: str, gizmo: bool = True) -> tuple[str, ...]:
+    """What Plan plans; "To gizmo" only while the trajectory gizmo is shown
+    (Draw mode)."""
+    return (
+        f"{'☑' if scope == 'path' else '☐'} Whole path",
+        f"{'☑' if scope == 'part' else '☐'} Segments",
+    ) + ((f"{'☑' if scope == 'gizmo' else '☐'} To gizmo",) if gizmo else ())
+
+
 def _short(message: str) -> str:
     """Planner message without the hints meant for the log."""
     return message.split(" — ")[0].strip()
+
+
+def _same_pose(a: tt.Waypoint, b: tt.Waypoint) -> bool:
+    """Within 1 mm and 1 deg."""
+    return bool(np.linalg.norm(a.position - b.position) < 1e-3 and tt.angle_between_wxyz(a.wxyz, b.wxyz) < np.radians(1.0))
 
 
 def _pose_text(position: np.ndarray, wxyz: np.ndarray) -> str:
@@ -481,8 +512,12 @@ class PathEditor:
     Viser prototype.
 
     The path is checked (failing segments red, fastest time per segment) or,
-    with Plan while drawing, planned after every change. Execute is in the
-    Control tab."""
+    with Plan continuously, planned after every change. Execute is in the
+    Plan & Execute folder of the trajectory view.
+
+    Servo view: while the servo gizmo is held, its motion is recorded from the
+    last waypoint (holding it still is a stop); Confirm Waypoint turns that
+    drawing into waypoints and ends it with a waypoint at the gizmo."""
 
     CHECK_DELAY_S = 0.4
     DRAFT_CHECK_PERIOD_S = 0.3
@@ -505,7 +540,7 @@ class PathEditor:
         self._planned: list[float] = []
         self._failed: set[int] = set()
         self._plan_text = ""
-        self._run_text = ""  # tracking of the last execution of this path
+        self._path_time: float | None = None  # duration of the editor's current plan (without approach)
         self._undo: list = []
         self._redo: list = []
         self._last_edit = 0.0
@@ -513,6 +548,10 @@ class PathEditor:
         self._check_due = False
         self._stale_plan = False
         self._ours = False  # the latest plan came from this editor
+        # What Plan plans: "path" (whole), "part" (waypoints _range) or "gizmo".
+        self._scope = "path"
+        self._range = (0, 1)  # waypoint indices of the part (from, to)
+        self._plan_label = ""  # what that plan is, for the UI
         self._request_id = 0
         self._draft_id = 0
         self._draft_failed = False
@@ -529,20 +568,32 @@ class PathEditor:
         self._realign_due = False
         self._draft = None
         self._draft_key = _REDRAW
+        # Drawing in the servo view: (t, position, wxyz) of the servo gizmo
+        # while it is held; t runs only while it is held.
+        self._sketch: list[tuple[float, np.ndarray, np.ndarray]] = []
+        self._sketch_held = False
+        self._sketch_clock: float | None = None
+        self._sketch_t = 0.0
+        self._sketch_handle = None
+        self._sketch_key = None
 
     # ------------------------------------------------------------------ GUI
-    def build_gui(self, gui) -> None:
+    def build_path(self, gui):
+        """The Path folder (drawing, modes, plan); returns the folder."""
         scene = self._ui.server.scene
-        with gui.add_folder("Path"):
+        folder = gui.add_folder("Path")
+        with folder:
             self._new_button = gui.add_button(
-                "New Path", icon=viser.Icon.ROUTE, hint="Starts a new path at the robot's TCP and puts the gizmo there"
+                "New Trajectory", icon=viser.Icon.ROUTE,
+                hint="Starts a new trajectory at the robot's TCP and puts the gizmo there",
             )
             self._summary = gui.add_markdown("")
             # Rows of small buttons: what is edited, the gizmo's axes, and
             # the orientation shortcut (TCP gizmo in Draw, waypoint in Edit).
             self._mode_select = gui.add_button_group("Mode", _mode_options("Draw"))
-            # The same setting as in the Control tab; both move and rotate,
-            # only the axes differ. Hidden while point tracking is on.
+            # Axes of the trajectory gizmo (the servo gizmo has its own); both
+            # move and rotate, only the axes differ. Hidden while point
+            # tracking is on.
             self._gizmo_axes = gui.add_button_group("Gizmo axes", axes_options("tool"))
             self._orient_button = gui.add_button_group("Orientation", ["Look at point"])
             self._confirm_button = gui.add_button(
@@ -550,31 +601,62 @@ class PathEditor:
                 hint="Adds the TCP gizmo pose as the next waypoint (end of the light green line)",
             )
             self._edit_buttons = gui.add_button_group("Edit", ["Undo", "Redo", "Clear"])
-            self._auto_plan = gui.add_checkbox(
-                "Plan while drawing", True,
-                hint="On: the trajectory is planned after every change (the preview robot follows). "
-                "Off: only a check (red segments, fastest times); press Plan Trajectory.",
+        self._build_scene_gizmos(scene)
+        self._mode_select.on_click(lambda e: self._on_mode(str(e.target.value)))
+        self._new_button.on_click(lambda _: self._new_path())
+        self._confirm_button.on_click(lambda _: self._confirm())
+        self._edit_buttons.on_click(lambda e: self._edit(e.target.value))
+        self._gizmo_axes.on_click(
+            lambda e: self._ui.set_gizmo_axes("base" if "base_link" in str(e.target.value) else "tool")
+        )
+        self._orient_button.on_click(lambda _: self._orient_to_point())  # the red tracking point
+        return folder
+
+    def build_plan_controls(self, gui) -> None:
+        """What to plan (inside the UI's Plan & Execute folder): the whole
+        path, a part of it (From → To) or a free motion to the gizmo."""
+        self._scope_select = gui.add_button_group("Plan", _scope_options("path"))
+        self._from_select = gui.add_dropdown("From waypoint", ["1"], visible=False)
+        self._to_select = gui.add_dropdown("To waypoint", ["1"], visible=False)
+        self._scope_select.on_click(lambda e: self._on_scope(str(e.target.value)))
+        self._from_select.on_update(lambda _: self._on_range("from"))
+        self._to_select.on_update(lambda _: self._on_range("to"))
+
+    def build_plan_button(self, gui) -> None:
+        """Plan continuously and Plan (below the UI's Speed)."""
+        self._auto_plan = gui.add_checkbox(
+            "Plan continuously", False,
+            hint="On: what is chosen is planned again after every change and the preview repeats. Off: press "
+            "Plan; the preview plays the plan once (the path is only checked: red segments, fastest times).",
+        )
+        self._plan_button = gui.add_button(
+            "Plan", icon=viser.Icon.ROUTE_2, hint="Plans what is chosen above; the preview plays it, then Execute"
+        )
+        self._auto_plan.on_update(lambda _: self._on_auto_plan())
+        self._plan_button.on_click(lambda _: self._plan())
+
+    def continuous(self) -> bool:
+        """Plan continuously: the preview repeats."""
+        return bool(self._auto_plan.value)
+
+    def build_details(self, gui) -> list:
+        """Waypoint and Segments folders; returns them."""
+        # Waypoint editing: the gizmo (Draw) or a waypoint (Edit), its pose,
+        # exact offsets and the table of all waypoints.
+        folders = [gui.add_folder("Waypoint")]
+        with folders[-1]:
+            self._wp_select = gui.add_dropdown(
+                "Waypoint", ["gizmo"], hint="gizmo: the drawing gizmo (Draw); a number: that waypoint (Edit)"
             )
-            self._plan_button = gui.add_button(
-                "Plan Trajectory", icon=viser.Icon.ROUTE_2,
-                hint="Approach + path; check the preview, then Execute in the Control tab",
-            )
-        with gui.add_folder("Waypoint"):
-            self._wp_select = gui.add_dropdown("Waypoint", ["—"])
-            self._straight_button = gui.add_button("Straight", hint="Removes the curve of the selected waypoint")
-            self._delete_wp = gui.add_button("Delete Waypoint", icon=viser.Icon.TRASH)
-        # All segments at once: one time field per segment, its label says
-        # the fastest possible time (0 = as fast as possible).
-        self._seg_folder = gui.add_folder("Segments")
-        with self._seg_folder:
-            self._seg_info = gui.add_markdown("")
-            self._seg_page = gui.add_dropdown("Show", ["—"], visible=False)
-        self._seg_inputs: dict[int, object] = {}
-        self._seg_labels: dict[int, str] = {}
-        self._seg_values: dict[int, float] = {}
-        self._seg_rows: tuple = ()
-        with gui.add_folder("Coordinates", expand_by_default=False):
             self._coord_info = gui.add_markdown("")
+            self._dwell_number = gui.add_number(
+                "Stop [s]", 0.0, min=0.0, max=600.0, step=0.1, visible=False,
+                hint="Rest at this waypoint before the next segment (0: no stop; not at the first or last waypoint)",
+            )
+            self._straight_button = gui.add_button(
+                "Straight", hint="Removes the curve of the selected waypoint", visible=False
+            )
+            self._delete_wp = gui.add_button("Delete Waypoint", icon=viser.Icon.TRASH, visible=False)
             self._move_by = gui.add_vector3("Move [mm]", (0.0, 0.0, 0.0), step=0.1)
             self._rotate_by = gui.add_vector3("Rotate [deg]", (0.0, 0.0, 0.0), step=0.1)
             self._offset_frame = gui.add_dropdown(
@@ -582,14 +664,40 @@ class PathEditor:
                 hint="Axes of the offset: robot base, or the gizmo's / waypoint's own axes",
             )
             self._apply_offset = gui.add_button(
-                "Apply Offset", hint="Moves the TCP gizmo (Draw) or the selected waypoint (Edit) by the offset"
+                "Apply Offset", hint="Moves the gizmo (Draw) or the selected waypoint (Edit) by the offset"
             )
             self._waypoint_table = gui.add_markdown("")
-        with gui.add_folder("Files", expand_by_default=False):
+        # All segments at once: one time field per segment, its label says
+        # the fastest possible time (0 = as fast as possible).
+        self._seg_folder = gui.add_folder("Segments")
+        folders.append(self._seg_folder)
+        with self._seg_folder:
+            self._seg_info = gui.add_markdown("")
+            self._seg_page = gui.add_dropdown("Show", ["—"], visible=False)
+        self._seg_inputs: dict[int, object] = {}
+        self._seg_labels: dict[int, str] = {}
+        self._seg_values: dict[int, float] = {}
+        self._seg_rows: tuple = ()
+        self._dwell_number.on_update(lambda _: self._on_dwell())
+        self._straight_button.on_click(lambda _: self._waypoint_action("Straight"))
+        self._wp_select.on_update(lambda _: self._on_select_waypoint())
+        self._delete_wp.on_click(lambda _: self._delete_selected_waypoint())
+        self._seg_page.on_update(lambda _: self._refresh_segment_table())
+        self._apply_offset.on_click(lambda _: self._on_apply_offset())
+        return folders
+
+    def build_files(self, gui) -> list:
+        """Path files (Files view)."""
+        folder = gui.add_folder("Path files")
+        with folder:
             self._file_name = gui.add_text("Name", "path")
             self._files = gui.add_dropdown("Path file", ["—"])
             self._file_buttons = gui.add_button_group("Files", ["Save", "Load", "Refresh"])
+        self._file_buttons.on_click(lambda e: self._file(e.target.value))
+        self._refresh_files()
+        return [folder]
 
+    def _build_scene_gizmos(self, scene) -> None:
         self._pose_gizmo = scene.add_transform_controls(
             "/fairino/path_pose", scale=0.16, depth_test=False, disable_sliders=False, visible=False
         )
@@ -610,26 +718,7 @@ class PathEditor:
             gizmo.on_drag_end(lambda _, key=key: self._on_drag_end(key))
         self._prev_gizmo.on_update(lambda _: self._on_tangent_gizmo(previous=True))
         self._next_gizmo.on_update(lambda _: self._on_tangent_gizmo(previous=False))
-        # The path's tracking point (purple sphere, set by coordinates),
-        # separate from the servo's.
         self._axes = "tool"
-        self._mode_select.on_click(lambda e: self._on_mode(str(e.target.value)))
-        self._new_button.on_click(lambda _: self._new_path())
-        self._confirm_button.on_click(lambda _: self._confirm())
-        self._edit_buttons.on_click(lambda e: self._edit(e.target.value))
-        self._auto_plan.on_update(lambda _: self._on_auto_plan())
-        self._gizmo_axes.on_click(
-            lambda e: self._ui.set_gizmo_axes("base" if "base_link" in str(e.target.value) else "tool")
-        )
-        self._orient_button.on_click(lambda _: self._orient_to_point())  # the red point (Control › Point tracking)
-        self._plan_button.on_click(lambda _: self._plan())
-        self._straight_button.on_click(lambda _: self._waypoint_action("Straight"))
-        self._wp_select.on_update(lambda _: self._on_select_waypoint())
-        self._delete_wp.on_click(lambda _: self._delete_selected_waypoint())
-        self._seg_page.on_update(lambda _: self._refresh_segment_table())
-        self._apply_offset.on_click(lambda _: self._on_apply_offset())
-        self._file_buttons.on_click(lambda e: self._file(e.target.value))
-        self._refresh_files()
 
     # ------------------------------------------------------------- helpers
     def _snapshot(self, merge: bool = False) -> None:
@@ -651,7 +740,7 @@ class PathEditor:
         self._changed_at = time.monotonic()
         self._check_due = len(self._waypoints) >= 2
         self._plan_text = ""
-        self._run_text = ""
+        self._path_time = None
         self._stale_plan = self._ours and not bool(self._auto_plan.value)
         self._draft_checked_key = None
 
@@ -703,6 +792,12 @@ class PathEditor:
             self._mode_select.options = _mode_options(mode)
         finally:
             self._updating = False
+        # Edit hides the trajectory gizmo: no "To gizmo" (the other two
+        # fill the row); back to the whole path if it was chosen.
+        if mode == "Edit" and self._scope == "gizmo":
+            self._apply_scope("path")
+        else:
+            self._scope_select.options = _scope_options(self._scope, gizmo=mode == "Draw")
         self._sync_fields()
 
     def _on_auto_plan(self) -> None:
@@ -712,8 +807,8 @@ class PathEditor:
                     self._check_due = True
                     self._changed_at = 0.0
         else:
-            # Off: the preview of the plan made while drawing goes away now;
-            # only the check runs until Plan Trajectory.
+            # Off: the plan made continuously and its preview go away now;
+            # only the check runs until Plan.
             self._clear_plan()
             with self._lock:
                 self._check_due = len(self._waypoints) >= 2
@@ -724,7 +819,7 @@ class PathEditor:
     def _new_path(self, reset_gizmo: bool = True) -> None:
         pose = self._ui.robot_tcp_pose()
         if pose is None:
-            self._ui.set_result("New Path: no robot pose yet")
+            self._ui.set_result("New Trajectory: no robot pose yet")
             return
         with self._lock:
             self._snapshot()
@@ -738,7 +833,7 @@ class PathEditor:
         self._set_mode("Draw")
         if reset_gizmo:
             self._ui.reset_gizmo_to_robot()
-            self._ui.set_result("New Path: starts at the robot TCP — move the gizmo and press Confirm Waypoint")
+            self._ui.set_result("New Trajectory: starts at the robot TCP — move the gizmo and press Confirm Waypoint")
 
     def _append(self, position: np.ndarray, wxyz: np.ndarray, label: str) -> None:
         with self._lock:
@@ -808,6 +903,8 @@ class PathEditor:
         with self._lock:
             self._plan_text = ""
             self._planned = []
+            self._plan_label = ""
+            self._path_time = None
 
     def _delete_selected_waypoint(self) -> None:
         with self._lock:
@@ -957,6 +1054,10 @@ class PathEditor:
         if self._updating:
             return
         value = str(self._wp_select.value)
+        if value == "gizmo":
+            if self._mode != "Draw":
+                self._set_mode("Draw")
+            return
         with self._lock:
             self._wp = int(value) - 1 if value.isdigit() else None
             if self._wp is not None and self._segments:
@@ -1036,7 +1137,7 @@ class PathEditor:
         too_fast = [
             f"{self._wp_label(k)} → {k + 2}"
             for k in range(min(n, len(fastest)))
-            if durations[k] is not None and durations[k] < fastest[k] * 0.999
+            if durations[k] is not None and fastest[k] is not None and durations[k] < fastest[k] * 0.999
         ]
         text = "Time per segment [s]; 0 = as fast as possible; ≥ = the fastest possible." if n else "No segments yet."
         if too_fast:
@@ -1086,8 +1187,22 @@ class PathEditor:
             wp = self._waypoints[i] if i is not None and i < n_wp else None
         self._updating = True
         try:
-            self._wp_select.options = tuple(self._wp_label(j) for j in range(n_wp)) or ("—",)
-            self._wp_select.value = self._wp_label(i) if wp is not None else "—"
+            edit = self._mode == "Edit"
+            self._wp_select.options = (
+                ("gizmo",) + tuple(self._wp_label(j) for j in range(n_wp)) + (("—",) if edit and wp is None else ())
+            )
+            # From → To of the planned part.
+            labels = tuple(str(j + 1) for j in range(n_wp)) or ("1",)
+            if tuple(self._from_select.options) != labels:
+                self._from_select.options = labels
+                self._to_select.options = labels
+            if n_wp >= 2:
+                with self._lock:
+                    first, last = self._part() if self._scope == "part" else self._range
+                first, last = min(first, n_wp - 2), min(max(last, 1), n_wp - 1)
+                self._from_select.value, self._to_select.value = str(first + 1), str(last + 1)
+            self._wp_select.value = "gizmo" if not edit else self._wp_label(i) if wp is not None else "—"
+            self._dwell_number.value = round(wp.dwell, 2) if wp is not None else 0.0
         finally:
             self._updating = False
 
@@ -1109,8 +1224,15 @@ class PathEditor:
         only turns waypoints on request: Orient to point)."""
         return None
 
+    def on_view(self, view: str) -> None:
+        """Servo view: the path stays visible, its editing gizmos and the
+        drawing line are hidden."""
+        with self._lock:
+            self._dirty = True
+            self._draft_key = _REDRAW
+
     def on_gizmo_axes(self, mode: str) -> None:
-        """Gizmo axes changed (here, in the Control tab, or by point tracking)."""
+        """Trajectory gizmo axes changed (here, or by point tracking)."""
         self._axes = mode
         self._gizmo_axes.options = axes_options(mode if not self._ui.tracking_on() else "base")
         with self._lock:
@@ -1158,14 +1280,25 @@ class PathEditor:
         self._ui.path_check_pub.publish(String(data=json.dumps(request)))
 
     def _plan(self, automatic: bool = False) -> None:
-        if not automatic and not self._ui.plan_mode_ready("Plan Trajectory"):
+        if self._scope == "gizmo":
+            if not automatic:
+                self._ui.plan_to_gizmo()
+            return
+        if not automatic and not self._ui.plan_mode_ready("Plan"):
             return
         with self._lock:
             if len(self._waypoints) < 2:
                 if not automatic:
-                    self._ui.set_result("Plan Trajectory: confirm at least one waypoint")
+                    self._ui.set_result("Plan: confirm at least one waypoint")
                 return
-            request = dict(self._request(), type="cartesian_path")
+            first, last = self._part()
+            # The whole path with the part: the planner moves the part as
+            # within the whole path (same joint motion).
+            request = dict(self._request(), type="cartesian_path", part=[first, last])
+            self._plan_label = (
+                f"path {first + 1}→{last + 1}" if (first, last) == (0, len(self._waypoints) - 1)
+                else f"segments {first + 1}→{last + 1}"
+            )
             self._plan_text = "⏳"
             self._check_due = False
             self._last_plan_request = time.monotonic()
@@ -1173,7 +1306,65 @@ class PathEditor:
         self._ours = True
         self._ui.path_goal_pub.publish(String(data=json.dumps(request)))
         if not automatic:
-            self._ui.set_result(f"Plan Trajectory: {len(request['waypoints'])} waypoints sent to the planner")
+            self._ui.set_result(f"Plan: {self._plan_label} sent to the planner")
+
+    # ----------------------------------------------------------- plan scope
+    def _part(self) -> tuple[int, int]:
+        """Waypoint indices planned: the whole path, or From → To. Caller holds the lock."""
+        last = len(self._waypoints) - 1
+        if self._scope != "part":
+            return 0, last
+        first, end = self._range
+        first = int(np.clip(first, 0, max(last - 1, 0)))
+        end = int(np.clip(end, first + 1, last))
+        return first, end
+
+    def plan_label(self) -> str:
+        """What the editor's last plan covers ("path 1→6", "segments 4→5")."""
+        return self._plan_label
+
+    def _on_scope(self, clicked: str) -> None:
+        self._apply_scope("part" if "Segments" in clicked else "gizmo" if "gizmo" in clicked else "path")
+
+    def _apply_scope(self, scope: str) -> None:
+        self._scope = scope
+        self._scope_select.options = _scope_options(self._scope, gizmo=self._mode == "Draw")
+        part = self._scope == "part"
+        self._from_select.visible = part
+        self._to_select.visible = part
+        with self._lock:
+            self._dirty = True  # the part is highlighted
+            if self._scope != "gizmo" and len(self._waypoints) >= 2:
+                self._changed()  # plan (or check) what is chosen now
+        self._ui.set_result(
+            {"path": "Plan: the whole path", "part": "Plan: the segments From → To",
+             "gizmo": "Plan: a free motion (RRT + TOPP-RA) to the trajectory gizmo"}[self._scope]
+        )
+
+    def _on_range(self, changed: str) -> None:
+        if self._updating:
+            return
+        try:
+            first, last = int(self._from_select.value) - 1, int(self._to_select.value) - 1
+        except ValueError:
+            return
+        with self._lock:
+            # The other field gives way: From 3 with To 2 -> To 4.
+            if last <= first:
+                if changed == "from":
+                    last = first + 1
+                else:
+                    first = last - 1
+            self._range = (first, last)
+            first, last = self._part()
+            self._range = (first, last)
+            if self._scope == "part" and len(self._waypoints) >= 2:
+                self._changed()
+        self._updating = True
+        try:
+            self._from_select.value, self._to_select.value = str(first + 1), str(last + 1)
+        finally:
+            self._updating = False
 
     def _maybe_check_draft(self) -> None:
         """While drawing: is the pose at the gizmo reachable from the last
@@ -1232,24 +1423,29 @@ class PathEditor:
         if kind != "cartesian_path":
             return
         with self._lock:
+            offset = int(status.get("first_segment", 0))  # segment indices are the whole path's
+            n_seg = len(self._segments)
             if state == "failed":
                 self._failed = {int(k) for k in status.get("failed_segments", [])}
                 where = ", ".join(f"{self._wp_label(k)} → {k + 2}" for k in sorted(self._failed))
                 self._plan_text = f"❌ {_short(status.get('message', ''))}" + (f" (segment {where})" if where else "")
             elif state == "planned":
                 self._failed.clear()
-                self._fastest = list(status.get("segment_fastest_s", self._fastest))
-                self._planned = list(status.get("segment_planned_s", []))
+                fastest = list(self._fastest) + [None] * max(0, n_seg - len(self._fastest))
+                planned: list = [None] * n_seg
+                for i, value in enumerate(status.get("segment_fastest_s", [])):
+                    if offset + i < n_seg:
+                        fastest[offset + i] = value
+                for i, value in enumerate(status.get("segment_planned_s", [])):
+                    if offset + i < n_seg:
+                        planned[offset + i] = value
+                self._fastest = fastest[:n_seg]
+                self._planned = planned
+                self._path_time = status.get("path_duration_s")
                 self._plan_text = "✅"
             elif state == "succeeded":
-                self._plan_text = ""  # the plan was used; planned again while drawing
-            tracking = status.get("tracking")
-            if tracking and state in ("succeeded", "failed"):
-                self._run_text = (
-                    f"*Last run: {tracking['max_deviation_mm']:.1f} mm max from the plan"
-                    + (" ⚠️ (details in Control)" if tracking["max_deviation_mm"] > 5.0 else "")
-                    + "*"
-                )
+                self._plan_text = ""  # the plan was used; planned again when continuous
+                self._path_time = None
             self._dirty = True
 
     def _robot_resting_elsewhere(self) -> bool:
@@ -1301,6 +1497,7 @@ class PathEditor:
             # orientation they had along that path.
             waypoints = tt.apply_look_at(waypoints, point)
         self.load_path(waypoints, segments, Path(name).stem)
+        self._ui.show_view("trajectory")
         self._ui.set_result(
             f"Load: {name} ({len(waypoints)} waypoints" + (", looks at a point)" if point is not None else ")")
         )
@@ -1317,7 +1514,7 @@ class PathEditor:
             self._clear_plan()  # the plan no longer matches the drawing
         auto = bool(self._auto_plan.value)
         if due:
-            # Plan while drawing: the plan also reports failing segments and
+            # Plan continuously: the plan also reports failing segments and
             # fastest times; otherwise only the check runs.
             self._plan(automatic=True) if auto else self._send_check()
         elif auto and self._ours:
@@ -1331,12 +1528,16 @@ class PathEditor:
                 self._plan(automatic=True)  # the robot moved since planning: new approach
         self._maybe_check_draft()
         self._draw_draft()
+        self._draw_sketch()
         with self._lock:
             if not self._dirty:
                 return
             self._dirty = False
             waypoints = [w.copy() for w in self._waypoints]
             k, i, failed, mode = self._seg, self._wp, set(self._failed), self._mode
+            scope_part = self._part() if self._scope == "part" and len(self._waypoints) >= 2 else None
+            if scope_part is not None:
+                k = None  # the part is shown instead of a single segment
         waypoints = self._shown_waypoints(waypoints)
         scene = self._ui.server.scene
         # Children (labels, numbered spheres) were added after their parent
@@ -1383,7 +1584,8 @@ class PathEditor:
             p0, p3 = waypoints[j].position, waypoints[j + 1].position
             cp = tt.control_points(waypoints, j)
             c1, c2 = cp if cp is not None else (p0 + (p3 - p0) / 3.0, p0 + 2.0 * (p3 - p0) / 3.0)
-            color = COLOR_FAILED if j in failed else COLOR_SELECTED if j == k else COLOR_SEGMENT
+            in_part = scope_part is not None and scope_part[0] <= j < scope_part[1]
+            color = COLOR_FAILED if j in failed else COLOR_SELECTED if (j == k or in_part) else COLOR_SEGMENT
             self._handles.append(
                 scene.add_spline_cubic_bezier(
                     f"/fairino/path/segment_{j}",
@@ -1396,7 +1598,7 @@ class PathEditor:
             )
         self._updating = True
         try:
-            editing = mode == "Edit" and i is not None and i < len(waypoints)
+            editing = mode == "Edit" and i is not None and i < len(waypoints) and self._ui.view() == "trajectory"
             self._pose_gizmo.visible = editing
             base_axes = self._ui.gizmo_axes() == "base"
             tracking = self._ui.tracking_on()  # the point decides the orientation
@@ -1433,7 +1635,7 @@ class PathEditor:
     def _draw_draft(self) -> None:
         """Light green line from the last waypoint (or the robot TCP) to the
         gizmo in Draw mode; red when that pose is not reachable."""
-        gizmo = self._ui.gizmo_pose() if self._mode == "Draw" else None
+        gizmo = self._ui.gizmo_pose() if self._mode == "Draw" and self._ui.view() == "trajectory" else None
         with self._lock:
             start = self._waypoints[-1].position.copy() if self._waypoints else None
             failed = self._draft_failed
@@ -1464,50 +1666,220 @@ class PathEditor:
             i = self._wp
             wp = self._waypoints[i] if i is not None and i < n_wp else None
             plan_text = self._plan_text
-            run_text = self._run_text
             mode = self._mode
             curves = sum(1 for w in self._waypoints if w.curve)
-            total = sum(self._planned) if len(self._planned) == n_seg and n_seg else None
+            total = self._path_time
+            label = self._plan_label
             length = sum(
                 float(np.sum(np.linalg.norm(np.diff(tt.segment_points(self._waypoints, j, 0.01)[0], axis=0), axis=1)))
                 for j in range(n_seg)
             )
-            table = [(self._wp_label(j), w.position * 1000.0) for j, w in enumerate(self._waypoints)]
+            table = [(j, w.position * 1000.0, w.dwell) for j, w in enumerate(self._waypoints)]
         if n_wp == 0:
-            self._summary.content = "Press **New Path** (starts at the robot TCP), move the TCP gizmo and press **Confirm Waypoint**."
+            self._summary.content = "Press **New Trajectory** (starts at the robot TCP), move the gizmo, **Confirm Waypoint**."
         else:
-            # ✅ planned and executable, ❌ cannot be executed (reason below),
-            # ⏳ planning, ⚪ not planned yet.
+            # One line (the panel must not change its height): ✅ planned and
+            # executable, ❌ cannot be executed (the reason is in the Robot
+            # window), ⏳ planning, ⚪ not planned yet.
             icon = plan_text[:1] if plan_text else ("⚪" if n_seg else "")
-            reason = plan_text[1:].strip() if icon == "❌" else ""
             self._summary.content = (
-                f"{icon} **{n_wp} waypoints · {n_seg} segments** · {curves} curve(s) · {length * 1000.0:.0f} mm"
-                + (f" · {total:.2f} s" if total is not None and icon == "✅" else "")
-                + (f"  \n{reason}" if reason else "")
-                + (f"  \n{run_text}" if run_text else "")
+                f"{icon} **{n_wp} waypoints · {n_seg} segments**"
+                + (f" · {curves} curve(s)" if curves else "")
+                + f" · {length * 1000.0:.0f} mm"
+                + (f" · {total:.2f} s" + (f" ({label})" if label.startswith("segments") else "")
+                   if total is not None and icon == "✅" else "")
             )
         self._refresh_segment_table()
-        # Coordinates (collapsed folder): kept short, base_link frame.
-        gizmo = self._ui.gizmo_pose()
-        lines = []
-        if gizmo is not None:
-            lines.append(f"Gizmo: {_pose_text(gizmo[0], gizmo[1])}")
-        if wp is not None:
-            lines.append(f"Waypoint {self._wp_label(i)}: {_pose_text(wp.position, wp.wxyz)}")
-        self._coord_info.content = "  \n".join(lines) + "  \n*Offset target: " + (
-            f"waypoint {self._wp_label(i)}*" if mode == "Edit" and wp is not None else "TCP gizmo*"
-        )
-        if table:
-            rows = ["| # | x | y | z [mm] |", "|---|---:|---:|---:|"]
-            rows += [f"| {name} | {p[0]:.1f} | {p[1]:.1f} | {p[2]:.1f} |" for name, p in table[:40]]
-            self._waypoint_table.content = "\n".join(rows)
+        # Waypoint folder: the gizmo (Draw) or the selected waypoint (Edit).
+        edit = mode == "Edit"
+        if not edit:
+            gizmo = self._ui.gizmo_pose()
+            self._coord_info.content = (
+                f"Gizmo: {_pose_text(gizmo[0], gizmo[1])}" if gizmo is not None else "Gizmo: —"
+            ) + "  \n*Apply Offset moves the gizmo*"
+        elif wp is not None:
+            self._coord_info.content = (
+                f"Waypoint {self._wp_label(i)}: {_pose_text(wp.position, wp.wxyz)}"
+                + f"  \n*Apply Offset moves waypoint {self._wp_label(i)}*"
+            )
         else:
-            self._waypoint_table.content = ""
-        self._confirm_button.disabled = mode != "Draw"
+            self._coord_info.content = "Pick a waypoint (sphere or list).  \n*Apply Offset needs a waypoint*"
+        rows = []
+        if table or not edit:
+            rows = ["| # | x | y | z [mm] |", "|---|---:|---:|---:|"]
+            for j, pos, dwell in table[:40]:
+                name = self._wp_label(j) + (f" ⏸{dwell:.1f}s" if dwell > 0.0 else "")
+                if edit and j == i:
+                    name = f"**{name}**"
+                rows.append(f"| {name} | {pos[0]:.1f} | {pos[1]:.1f} | {pos[2]:.1f} |")
+            if not edit:
+                gizmo = self._ui.gizmo_pose()
+                if gizmo is not None:
+                    g = gizmo[0] * 1000.0
+                    rows.append(f"| **gizmo** | {g[0]:.1f} | {g[1]:.1f} | {g[2]:.1f} |")
+        self._waypoint_table.content = "\n".join(rows)
+        if self._confirm_button.visible == edit:  # nothing to confirm in Edit
+            self._confirm_button.visible = not edit
+        for handle in (self._straight_button, self._delete_wp, self._dwell_number):
+            if handle.visible != edit:
+                handle.visible = edit
         tracking = self._ui.tracking_on()
         for handle in (self._gizmo_axes, self._orient_button):  # point tracking decides the orientation
             if handle.visible == tracking:
                 handle.visible = not tracking
         self._delete_wp.disabled = wp is None
         self._straight_button.disabled = wp is None or not wp.curve
-        self._plan_button.disabled = not plan_mode or n_wp < 2
+        self._dwell_number.disabled = wp is None or i in (0, n_wp - 1)
+        self._apply_offset.disabled = edit and wp is None
+        self._plan_button.disabled = not plan_mode or (self._scope != "gizmo" and n_wp < 2)
+
+    def problem(self) -> str:
+        """Why the path cannot be executed (check or plan), or ""."""
+        with self._lock:
+            return self._plan_text[1:].strip() if self._plan_text.startswith("❌") else ""
+
+    def _on_dwell(self) -> None:
+        if self._updating:
+            return
+        value = max(0.0, float(self._dwell_number.value))
+        with self._lock:
+            i = self._wp
+            if i is None or not 0 < i < len(self._waypoints) - 1:
+                return
+            if abs(self._waypoints[i].dwell - value) < 1e-9:
+                return
+            self._snapshot(merge=True)
+            self._waypoints[i].dwell = value
+            self._changed()
+        self._ui.set_result(
+            f"Waypoint {self._wp_label(i)}: " + (f"stop {value:.1f} s" if value > 0.0 else "no stop")
+        )
+
+    # ------------------------------------------------- drawing in the servo view
+    SKETCH_DT_S = 0.02  # sampling period of the held servo gizmo
+    SKETCH_MAX_SAMPLES = 60000  # 20 min at 50 Hz
+
+    def servo_hold(self, held: bool) -> None:
+        """The servo gizmo was grabbed (True) or released (False)."""
+        with self._lock:
+            self._sketch_held = bool(held)
+            self._sketch_clock = None
+
+    def servo_sample(self, position: np.ndarray, wxyz: np.ndarray) -> None:
+        """One pose of the held servo gizmo (base_link). Time runs only while
+        it is held: a pause after a release is not part of the drawing, holding
+        it still is (a stop)."""
+        now = time.monotonic()
+        with self._lock:
+            if not self._sketch_held or len(self._sketch) >= self.SKETCH_MAX_SAMPLES:
+                return
+            if self._sketch_clock is None:
+                self._sketch_t += self.SKETCH_DT_S if self._sketch else 0.0  # grabbed again
+            else:
+                self._sketch_t += now - self._sketch_clock
+            self._sketch_clock = now
+            self._sketch.append((self._sketch_t, np.asarray(position, dtype=float).copy(), np.asarray(wxyz, dtype=float).copy()))
+
+    def servo_drawing_text(self) -> str:
+        with self._lock:
+            sketch = self._sketch
+            t = sketch[-1][0] if sketch else 0.0
+            length = (
+                float(np.sum(np.linalg.norm(np.diff(np.array([p for _, p, _ in sketch]), axis=0), axis=1)))
+                if len(sketch) > 1 else 0.0
+            )
+        return f"Drawn since the last waypoint: {t:.1f} s · {length * 1000.0:.0f} mm"
+
+    def servo_discard(self) -> None:
+        with self._lock:
+            had = bool(self._sketch)
+            self._sketch, self._sketch_t, self._sketch_clock = [], 0.0, None
+        self._ui.set_result("Drawing discarded" if had else "Nothing drawn to discard")
+
+    def servo_undo(self) -> None:
+        """Undo in the servo view (the servo gizmo stays where it is)."""
+        with self._lock:
+            possible = bool(self._undo)
+        self._edit("Undo")
+        with self._lock:
+            n = len(self._waypoints)
+        self._ui.set_result(f"Undo: {n} waypoint(s)" if possible else "Undo: nothing to undo")
+
+    def servo_confirm(self) -> None:
+        """Servo view: the drawing since the last waypoint (if any) becomes
+        waypoints, ending with a waypoint at the servo gizmo; drawing then
+        continues from there. Without a drawing it only adds that waypoint
+        (teaching by driving the robot); the first one starts the path."""
+        pose = self._ui.servo_gizmo_pose()
+        with self._lock:
+            sketch = self._sketch
+            self._sketch, self._sketch_t, self._sketch_clock = [], 0.0, None
+        if pose is None:
+            self._ui.set_result("Confirm: no servo gizmo pose yet")
+            return
+        new_wps: list[tt.Waypoint] = []
+        new_segs: list[tt.Segment] = []
+        if len(sketch) >= 2:
+            new_wps, new_segs = tt.drawing_to_path(
+                np.array([t for t, _, _ in sketch]),
+                np.array([p for _, p, _ in sketch]),
+                np.array([q for _, _, q in sketch]),
+            )
+        end = tt.Waypoint(pose[0].copy(), pose[1].copy())
+        if not new_wps:
+            new_wps = [end]
+        elif not _same_pose(new_wps[-1], end):
+            new_wps.append(end)  # the gizmo moved after the drawing (e.g. turned toward the point)
+            new_segs.append(tt.Segment())
+        drawn = sketch[-1][0] if len(sketch) >= 2 else 0.0
+        stops = sum(1 for w in new_wps if w.dwell > 0.0)
+        with self._lock:
+            merge = bool(self._waypoints) and _same_pose(self._waypoints[-1], new_wps[0])
+            if merge and len(new_wps) == 1 and new_wps[0].dwell <= 0.0:
+                self._ui.set_result("Confirm: the gizmo is on the last waypoint (nothing drawn)")
+                return
+            self._snapshot()
+            if merge:
+                self._waypoints[-1].dwell += new_wps[0].dwell  # the drawing starts at the last waypoint
+                new_wps = new_wps[1:]
+            elif self._waypoints:
+                new_segs = [tt.Segment()] + new_segs  # straight from the last waypoint to the drawing
+            self._waypoints += new_wps
+            self._segments += new_segs
+            self._seg = len(self._segments) - 1 if self._segments else None
+            self._changed()
+            n = len(self._waypoints)
+        self._sync_fields()
+        self._ui.set_result(
+            f"Confirm: waypoint {n} at the gizmo"
+            + (f" (+{len(new_wps) - 1} from the drawing, {drawn:.1f} s" + (f", {stops} stop(s)" if stops else "") + ")"
+               if drawn > 0.0 else "")
+        )
+
+    def _draw_sketch(self) -> None:
+        """Green line of the servo drawing (servo view), from the last waypoint."""
+        show = self._ui.view() == "servo"
+        with self._lock:
+            points = [p for _, p, _ in self._sketch] if show else []
+            start = self._waypoints[-1].position.copy() if self._waypoints and points else None
+        key = (len(points), None if start is None else tuple(np.round(start, 5)))
+        if key == self._sketch_key:
+            return
+        self._sketch_key = key
+        if self._sketch_handle is not None:
+            self._sketch_handle.remove()
+            self._sketch_handle = None
+        if len(points) < 2 and start is None:
+            return
+        line = np.array(([start] if start is not None else []) + points)
+        if len(line) < 2:
+            return
+        travel = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1))])
+        keep = np.unique(np.concatenate([[0, 1], np.searchsorted(travel, np.arange(0.0, travel[-1], 0.002)), [len(line) - 1]]))
+        keep = keep[keep < len(line)]
+        line = line[keep]
+        if len(line) < 2:
+            return
+        self._sketch_handle = self._ui.server.scene.add_line_segments(
+            "/fairino/path/sketch", points=np.stack([line[:-1], line[1:]], axis=1), colors=COLOR_DRAFT, thickness=0.004
+        )

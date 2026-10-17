@@ -77,20 +77,46 @@ offset in the UI. Bottom left: the browser's frame rate and the longest
 frame of the last second (`60 fps · max frame 20 ms`), measured in the page;
 a low value means the browser/GPU is slow, it does not affect the robot.
 
-The panel starts with the state (coloured: 🔵 DISABLED, 🟢 ACTIVE, 🟡 HOLD,
-🟠 FAULT, 🔴 LOCKOUT) · mode · active controller · FAIRINO connection · reason,
-then the *Last command* line and six tabs. The **Planned motion** box with
-the only **Execute** button is in the *Control* tab, below *Plan* and above
-*Fault*; it shows the plan waiting for Execute from any source (Plan, Home,
-a replay from *Record*, a path from *Path*): state, duration, approach,
-slowdown and the preview controls.
+The UI starts in dark mode. Viser's **Share** button (top right of the
+panel, UI node parameter `show_share_button`, default `true`) creates a
+public link through Viser's relay server (needs internet access): **whoever
+has that link sees the UI and can operate the robot** (servo, Execute,
+Home). Share only on a supervised cell; set `show_share_button:=false` where
+that is not wanted.
 
-| Tab | Content |
+A small window at the top left (*Robot*; it can be moved and minimized)
+shows the state (coloured: 🔵 DISABLED, 🟢 ACTIVE, 🟡 HOLD, 🟠 FAULT,
+🔴 LOCKOUT) · mode · active controller · FAIRINO connection · reason and the
+plan line (what is planned or executing, its duration, the speed), the line
+about the last execution (deviation from the plan), a `❌ Path: …` line when
+the drawn path cannot be executed, and the *Last command* line. Messages are
+there so that the working panel on the right keeps its size. Only in FAULT
+or LOCKOUT the fault box and the **Recover** button appear there (section 6).
+
+The control panel on the right:
+
+| Part | Content |
 |---|---|
-| **Control** | Point tracking (Enable/Disable Point Tracking, point in `base_link`), servo buttons (Enable/Disable Servo, Servo Hold/Resume Servo, Reset Target), Plan and Home, Planned motion with **Execute**, fault box with Recover |
-| **Record** | recording, library, replay, Edit as Path ([trajectory_recording_and_paths.md](trajectory_recording_and_paths.md)) |
-| **Path** | Cartesian path editor: draw from the robot TCP with Confirm Waypoint, curve waypoints (Bezier), time per segment (fastest shown), automatic planning, files |
-| **Status** | servo state, active controller, fault, suggested action, joint feedback age/rate, Viser target age, tracking error, recovery attempts and result, rates and scheduling, FAIRINO connection, enabled, manual/automatic mode, main/sub code, E-stop, safety stops, collision and collision levels, safety door/plane/data, driver alarms, soft limit/abnormal stop, UDP state, ServoJ streaming, last ServoJ code and counters, feedback age/rate, `write()` period; timing table (mean/p99/max/overruns) |
+| **View: ☐ Servo / ☑ Trajectory / ☐ Files** | the views, like tabs. Servo and Trajectory show their content **and switch the robot's mode** (Servo → servo mode, Trajectory → plan mode); Files does not change the mode. Viser tabs cannot do this, because the selected tab is not reported to the server. Servo is refused while a trajectory or Home is executing. At start the view follows the servo's current mode |
+| **Record** ↔ **Stop & Save Recording** | shared by all views: a recording continues across servo motion and executed trajectories (one segment per motion, pauses while the robot rests); *Discard Recording* while one is running |
+| **Enable/Disable Point Tracking**, *Point [mm]* | shared (one point); each view's gizmo reacts in its own way (below) |
+| **Home** | shared: plans and executes the motion to the home pose in one step (section 5); from the servo view the servo is enabled again afterwards |
+| *Servo* view | **Servo Hold ↔ Resume Servo**, *Gizmo axes* of the servo gizmo, drawing with the servo gizmo (below): *Drawn since the last waypoint*, **Confirm Waypoint**, *Drawing* **Undo / Discard**; **Enable Servo** appears only when the servo is not active in this view (refused, or after a fault). The servo gizmo is put on the robot TCP on every enable/resume |
+| *Trajectory* view | **Path** (editor, **New Trajectory**), **Plan & Execute** (what to plan: *Whole path*, *Segments* From → To, or *To gizmo*; **Speed**; *Plan continuously*; **Plan**; **Execute** right below it; **Gizmo to Robot TCP**), **Waypoint** (the gizmo or a waypoint: pose, *Stop [s]*, offsets, table), **Segments** |
+| *Files* view | **Recordings** (library, replay, Edit as Path) and **Path files** (save/load drawn paths) ([trajectory_recording_and_paths.md](trajectory_recording_and_paths.md)); loading switches to the trajectory view |
+| **System** (collapsed) | tabs *Status*, *Speed*, *Audit* (below) |
+
+Each view has its own gizmo. The **servo gizmo** is the target the servo
+follows; it is synchronized with the robot TCP on every enable. The
+**trajectory gizmo** draws and plans; the robot does not follow it, and it
+stays where it was left when the view changes (*Gizmo to Robot TCP* or *New
+Trajectory* bring it to the robot). The path, the recording trail and the measured
+TCP stay visible in both views; the planned trajectory, its preview and the
+path's editing handles only in the trajectory view.
+
+| System tab | Content |
+|---|---|
+| **Status** | servo state, active controller, orientation task (full pose / tool axis only), fault, suggested action, joint feedback age/rate, Viser target age, tracking error, recovery attempts and result, rates and scheduling, FAIRINO connection, enabled, manual/automatic mode, main/sub code, E-stop, safety stops, collision and collision levels, safety door/plane/data, driver alarms, soft limit/abnormal stop, UDP state, ServoJ streaming and executed rate, last ServoJ code and counters, feedback age/rate, `write()` period; timing table (mean/p99/max/overruns) |
 | **Speed** | global speed (manual/automatic), Apply Global Speed with confirmation, the four speed layers, the safety-speed form (SimMachine only) |
 | **Audit** | newest 25 audit events of the servo and the hardware |
 
@@ -99,13 +125,12 @@ services check again and answer with a reason in *Last command*.
 
 ## 3. Servo mode
 
-The *Servo* folder has one button that toggles **Enable Servo** (servo mode,
-tracking the gizmo) / **Disable Servo** (leave servoing; this is plan mode:
-the trajectory controller holds the robot), and one that toggles **Servo
-Hold** (servo mode, not tracking) / **Resume Servo**. Each button shows the
-action it will perform. There is no separate mode switch.
+Choose **View: Servo**: the UI enables the servo (servo mode, tracking the
+gizmo). **View: Trajectory** disables it again (plan mode: the trajectory
+controller holds the robot). In the *Servo* folder one button toggles
+**Servo Hold** (servo mode, not tracking) / **Resume Servo**.
 
-1. **Enable Servo** from plan mode: the robot must be at rest (Enable is refused while a
+1. Enabling from plan mode: the robot must be at rest (refused while a
    planned trajectory is still executing). The servo copies the measured joints
    into the command, resets the target to the current TCP, resets the filter
    and OInK state, switches controllers and becomes ACTIVE. The gizmo jumps to
@@ -125,13 +150,18 @@ automatically; it prevents an old gizmo position from pulling the robot.
 
 ### Point tracking and gizmo axes
 
-*Control › Point tracking* (above *Servo*): **Enable Point Tracking** /
-**Disable Point Tracking** (one button). While it is on, you move the TCP
-with the gizmo as usual and the tool z axis keeps pointing at the point.
+**Enable Point Tracking** / **Disable Point Tracking** (one button, shared by
+both views). While it is on, you move the TCP with the gizmo as usual and the
+tool z axis keeps pointing at the point.
 
 - There is one point (red sphere, shown while tracking is on), set only by
-  *Point [mm]* in `base_link`; default −3000, 0, 0 mm. *Path › Orient to
-  point* uses the same point, also when tracking is off.
+  *Point [mm]* in `base_link`; default −3000, 0, 0 mm. *Path › Orientation ›
+  Look at point* uses the same point, also when tracking is off.
+- Servo view: the robot follows (below). Trajectory view: the trajectory
+  gizmo looks at the point (the robot does not move), Confirm stores that
+  orientation and a moved waypoint (Edit) turns toward the point. Switching
+  views keeps tracking on; the servo's free tool roll is requested only in
+  the servo view.
 - While servoing, the target turns toward the point at most 45°/s (switching
   tracking on, or typing a point far away, does not swing the robot round at
   once; measured: 63° in 1.5 s).
@@ -148,13 +178,13 @@ with the gizmo as usual and the tool z axis keeps pointing at the point.
   robot has reached. Switching the gizmo axes never changes the orientation;
   only *Look at point* and point tracking turn it toward the point.
 
-**Gizmo axes** (*Control › Servo* and *Path*, one setting): **☐ base_link /
-☑ tool**. Both move and rotate; only the axes differ. `tool`: the gizmo is the
+**Gizmo axes** (*Servo* folder for the servo gizmo, *Path* folder for the
+trajectory gizmo; each its own setting): **☐ base_link / ☑ tool**. Both move and rotate; only the axes differ. `tool`: the gizmo is the
 target pose (its arrows and rings are the tool axes). `base_link`: the gizmo
 rests at the base axes; moving it moves the target, turning a ring turns the
 target about that base axis, and after release the gizmo returns to the base
 axes while small axes at the target show its orientation. The same applies to
-the waypoint gizmo in the Path tab's Edit mode. While point tracking is on the
+the waypoint gizmo in the Path editor's Edit mode. While point tracking is on the
 gizmo always uses `base_link` axes without rotation (the point decides) and
 the choice is hidden.
 
@@ -164,31 +194,50 @@ the choice is hidden.
 |---|---|
 | **Servo Hold** | ACTIVE → HOLD: no further target tracking; the joints decelerate at the acceleration limit (540 deg/s², at most ≈ 0.35 s from full speed) and then hold |
 | **Resume Servo** (in HOLD) | resume (after the deceleration has finished): target reset to the current TCP, then ACTIVE |
-| **Reset Target to Current TCP** | moves the gizmo and the servo reference to the current TCP (useful after dragging the gizmo far away). While ACTIVE and moving, the robot decelerates at the acceleration limit towards that point instead of stopping abruptly; refused while synchronizing or recovering |
-| **Disable Servo** | ACTIVE → HOLD, wait for standstill, switch back to the trajectory controller (plan mode, state DISABLED). From FAULT/LOCKOUT the controller is switched but the fault state remains |
+| **View: Trajectory** (disables the servo) | ACTIVE → HOLD, wait for standstill, switch back to the trajectory controller (plan mode, state DISABLED). From FAULT/LOCKOUT the controller is switched but the fault state remains |
 
-## 5. Plan mode (RRT + TOPP-RA)
+## 5. Plan mode: Plan & Execute
 
-1. Make sure the summary shows `DISABLED · mode plan · controller fairino20_controller`
-   (press **Disable Servo** if the servo is active).
-2. Move the gizmo to the goal pose, or press **Home** instead of Plan:
-   it plans to the home joint pose (UI parameter `home_joints_deg`, default
-   0, −90, 90, −90, −90, 0 deg: tool pointing down) through the same
-   pipeline.
-3. **Plan**: the planner solves IK from the measured state, plans with RRT,
-   shortcuts and time-parameterizes with TOPP-RA (FR20 velocity limits,
-   540 deg/s²). The planned TCP path is drawn in blue; the planner status
-   shows points, duration and planning time.
-4. **Preview**: a translucent blue robot replays the planned motion in real
-   time and loops (1 s pause on the goal) until Execute. *Preview speed*
-   slows it down or speeds it up (display only), the *Preview planned motion*
-   checkbox hides it. The preview never moves the robot.
-5. **Execute**: sends exactly the planned, time-parameterized trajectory to
-   `fairino20_controller` (same timing as the preview at speed 1; the FAIRINO
-   global speed does not scale it). Status goes `executing` → `succeeded`; the
-   preview disappears.
+1. Choose **View: Trajectory**; the top-left window shows `DISABLED · plan
+   mode · controller fairino20_controller`.
+2. In *Plan & Execute* choose what to plan:
 
-Plan and Execute are disabled in servo mode. The planner checks robot
+   | Plan | What is planned |
+   |---|---|
+   | **Whole path** | the drawn path from waypoint 1 to the last one |
+   | **Segments** | only the waypoints *From waypoint* → *To waypoint* (e.g. 4 → 5), to tune or repeat one part without running the whole path. The part is highlighted yellow. It moves the robot exactly as within the whole path (the joint motion of the whole path from its start, cut at the part); if the path before the part cannot be followed, the part starts from the configuration nearest to the current one. Picking From ≥ To moves the other field (From 3 with To 2 → To 4) |
+   | **To gizmo** | a free motion to the trajectory gizmo: IK from the measured state, RRT, shortcutting and TOPP-RA (FR20 velocity limits, 540 deg/s²). Draw mode only: in Edit the gizmo is hidden, so the choice disappears (Whole path and Segments fill the row; a chosen *To gizmo* becomes *Whole path*) |
+
+   Path and segments start with a free approach (RRT + TOPP-RA) from where
+   the robot is to their first waypoint, then follow the drawn path.
+3. **Speed** (0.05–1): the execution speed of every plan (path, segments,
+   gizmo, Home, replay). 1 = the planned times (fastest, or the time set per
+   segment); 0.5 = every segment, stop and the approach take twice as long
+   (a 10 s plan takes 20 s). The planner divides all times by it (joint
+   velocities scale by the speed, accelerations by its square, so the limits
+   hold) and publishes the waiting plan again at once when it changes.
+4. **Plan**: the plan line in the top-left window says what was planned
+   and how long it takes, e.g. `Planned: segments 4→5 · 1.45 s (approach
+   0.63 s) · speed 0.50` or `Planned: home`. The planned TCP path is drawn in blue.
+5. **Preview**: after every plan a translucent blue robot plays the planned
+   motion once, in real time and at the chosen speed: exactly what Execute
+   will do (measured: planned 13.21 s, executed 13.20 s at speed 0.5). With
+   *Plan continuously* the path is planned again after every change and the
+   preview repeats (1 s pause on the goal). The preview never moves the robot.
+6. **Execute** (right below Plan): sends exactly the published trajectory to
+   `fairino20_controller` (the FAIRINO global speed does not scale it).
+   Status goes `executing` → `succeeded`; the preview disappears.
+
+**Gizmo to Robot TCP** puts the trajectory gizmo on the robot's TCP (Draw mode only, like the gizmo).
+
+**Home** (shared, both views) plans and executes in one step: to the home
+joint pose (UI parameter `home_joints_deg`, default 0, −90, 90, −90, −90,
+0 deg: tool pointing down). From the servo view it switches to plan mode
+first and enables the servo again when the robot is home; the steps appear
+as `Home: …` in *Last command*. It is refused in FAULT/LOCKOUT and while a
+Home is running.
+
+Plans and Execute are in the trajectory view only (plan mode). The planner checks robot
 self-collisions; there is no environment model.
 
 ## 5a. Recording, replay and path editor
@@ -196,47 +245,67 @@ self-collisions; there is no environment model.
 Short form; details, file format and measurements in
 [trajectory_recording_and_paths.md](trajectory_recording_and_paths.md).
 
-- **Record** tab: **Record** arms the recorder, it starts with the next motion
-  (servoing or Execute) and pauses while the robot is at rest; **Stop & Save**
-  writes the file. Load a recording, choose *Recorded timing* or *Fastest
-  within limits* and a speed, **Plan Replay**, check the preview, **Execute**.
+- **Record** (both views) arms the recorder, it starts with the next motion
+  (servoing or Execute), pauses while the robot is at rest and continues in
+  either view; **Stop & Save Recording** writes the file. In *Recordings*
+  (Files view) load it, choose *Recorded timing* or *Fastest within
+  limits*, **Plan Replay** (at the *Speed* of Plan & Execute), check the
+  preview, **Execute**.
   **Edit as Path** turns it into waypoints.
-- **Path** tab, *Draw* mode: **New Path** starts at the robot's TCP and puts
-  the gizmo there. Move the TCP gizmo (in servo mode the robot follows it);
+- **Path**, *Draw* mode: **New Trajectory** starts at the robot's TCP and puts
+  the trajectory gizmo there. Move the gizmo (the robot does not follow it);
   the green line shows the next segment and turns red as soon as the
   pose is out of reach; **Confirm Waypoint** fixes it. Clicking an earlier
   waypoint puts the gizmo on it; Confirm adds the segment back to it. After
   Undo/Redo/Delete Waypoint the gizmo goes to the end of the path.
-- *Edit* mode (☑ Edit next to ☐ Draw, or pick a waypoint): the TCP gizmo disappears; a clicked
+- *Edit* mode (☑ Edit next to ☐ Draw, or pick a waypoint): the TCP gizmo and *Confirm Waypoint* disappear; a clicked
   waypoint shows a gizmo to move/rotate it and two small tangent handles
   (toward the previous/next waypoint); drag a handle to bend the path through
   the waypoint, **Straight** removes the curve. *Gizmo axes* switches the
   gizmo between `base_link` axes (move only) and the pose's own orientation
-  (move and rotate); **Orient to point** turns the TCP gizmo (Draw) or the
+  (move and rotate); *Orientation › Look at point* turns the trajectory gizmo (Draw) or the
   selected waypoint (Edit) toward the red tracking point; with point
   tracking on, a moved waypoint turns toward it by itself. Waypoints are
   numbered from 1. Waypoints at the same point
   get small numbered spheres next to it; click the one you want.
   Selected segment/waypoint: yellow. Summary icon: ✅ planned, ❌ cannot be
   executed, ⏳ planning, ⚪ not planned. Select a segment to see its **fastest time** and enter
-  a longer *Time [s]* if wanted. With **Plan while drawing** the trajectory is
-  planned after every change (untick it to remove the plan and only check,
-  then press **Plan Trajectory**); a segment that cannot be executed turns
-  red. The collapsed *Coordinates* folder shows poses in `base_link` and moves
-  the gizmo or the selected waypoint by an exact offset. Check the preview
-  and press **Execute** in *Control*. **Clear** removes the path and the plan.
-- After every **Execute**, *Planned motion* (Control tab) shows one line:
+  a longer *Time [s]* if wanted. Without *Plan continuously* the path is
+  only checked after a change (a segment that cannot be executed turns red,
+  the reason is in the top-left window) and **Plan** plans it; with it, it
+  is planned after every change. The *Waypoint* folder shows `gizmo` in Draw
+  mode (its pose and a `gizmo` row in the table) or the selected waypoint in
+  Edit mode (pose, **Stop [s]**: a rest at that waypoint, **Straight**,
+  **Delete Waypoint**), moves the gizmo or the waypoint by an exact offset
+  (*Move*, *Rotate*, *Frame*, **Apply Offset**) and lists all waypoints in
+  `base_link` (⏸ = stop). Check the preview and press **Execute** in *Plan &
+  Execute*. **Clear** removes the path and the plan.
+- **Drawing in the servo view**: while the servo gizmo is held (mouse
+  button down) its motion is recorded from the last waypoint, the robot
+  follows it as usual, and a green line shows it. Time runs only while the
+  gizmo is held: after a release nothing is recorded; holding it still for
+  0.5 s or longer becomes a stop (*Stop [s]* of a waypoint). **Confirm
+  Waypoint** turns the drawing into curve waypoints with the drawn segment
+  times (as *Edit as Path*, 3 mm tolerance) and ends it with a waypoint at
+  the gizmo; drawing then continues from there. Without a drawing it only
+  adds a waypoint at the gizmo (teaching by driving the robot; the first one
+  starts the path). If the drawing does not start at the last waypoint (e.g.
+  the robot was elsewhere), a straight segment joins them; execute the path
+  first to continue exactly from its end. **Discard** drops the unconfirmed
+  drawing, **Undo** removes the last confirmed addition.
+- After every **Execute**, the top-left window shows one line:
   largest and mean distance of the measured TCP from the planned path, the
   executed vs. planned time and the lowest ServoJ rate the controller kept
   up with; above 5 mm a ⚠️ line says how far and why (e.g. the SimMachine
-  executed fewer ServoJ points than needed). The Path tab repeats the
+  executed fewer ServoJ points than needed). The Path folder repeats the
   largest distance after a path run. The *Status* tab shows the ServoJ
   points/s the controller executes right now.
 
 ## 6. Faults and recovery
 
-The fault box shows severity, source, main/sub/SDK code, description, policy,
-suggested action and recovery attempts. There is one **Recover** button:
+In FAULT or LOCKOUT the top-left window shows the fault box (severity,
+source, main/sub/SDK code, description, policy, suggested action and recovery
+attempts) and one **Recover** button; both disappear when the fault is gone:
 
 - in FAULT it calls `/fairino_servo/recover` (controlled recovery, enables the
   robot if needed); for an unknown fault code that service refuses, and the

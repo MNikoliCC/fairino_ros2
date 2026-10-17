@@ -13,7 +13,7 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
+from std_msgs.msg import Float64, String
 from std_srvs.srv import Trigger
 from builtin_interfaces.msg import Duration
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -49,10 +49,13 @@ from fairino_trajectory_tools import (
     look_at_from_payload,
     PathIk,
     fit_recorded_timing,
+    insert_dwells,
     parameterize_path,
     path_from_payload,
+    path_part,
     quat_wxyz_to_matrix,
     sample_path,
+    slice_path,
     smooth_recording,
     tracking_report,
 )
@@ -478,7 +481,18 @@ class FairinoPlanExecute(Node):
         self._path_pub = self.create_publisher(
             JointTrajectory, "~/planned_path", latched
         )
+        self._last_state = "ready"
         self._publish_status("ready", "waiting for a goal")
+
+        # Execution speed (0.05..1, from the UI): every plan is published and
+        # executed with its times divided by it (0.5: everything takes twice
+        # as long; velocities scale by 0.5, accelerations by 0.25, so the
+        # limits hold). The plan is kept at speed 1 and published again when
+        # the speed changes while it waits for Execute, so the preview and
+        # the execution are always the same trajectory.
+        self._speed = 1.0
+        self._unscaled_plan = None
+        self._speed_sub = self.create_subscription(Float64, "~/speed_scale", self._on_speed, latched)
 
         self.get_logger().info(
             "Ready."
@@ -493,6 +507,7 @@ class FairinoPlanExecute(Node):
         )
 
     def _publish_status(self, state, message, **extra):
+        self._last_state = state
         payload = {"state": state, "message": message, "stamp": time.time()}
         payload.update(extra)
         self._status_pub.publish(String(data=json.dumps(payload)))
@@ -748,20 +763,50 @@ class FairinoPlanExecute(Node):
         return msg
 
     def _publish_plan(self, times, positions, velocities, plan_started, **extra):
-        msg = self._make_trajectory_msg(times, positions, velocities)
+        self._unscaled_plan = (
+            np.asarray(times, dtype=float),
+            np.asarray(positions, dtype=float),
+            np.asarray(velocities, dtype=float),
+            time.monotonic() - plan_started,
+            extra,
+        )
+        self._publish_scaled_plan()
+
+    def _publish_scaled_plan(self):
+        """The kept plan (speed 1) at the execution speed: Execute sends
+        exactly what is published (and previewed)."""
+        times, positions, velocities, planning_time, extra = self._unscaled_plan
+        speed = self._speed
+        extra = dict(extra)
+        for key in ("approach_duration_s", "path_duration_s", "dwell_s"):
+            if key in extra:
+                extra[key] = round(float(extra[key]) / speed, 4)
+        if "segment_planned_s" in extra:
+            extra["segment_planned_s"] = [round(v / speed, 3) for v in extra["segment_planned_s"]]
+        msg = self._make_trajectory_msg(times / speed, positions, velocities * speed)
         self._planned_msg = msg
         self._planned_kind = extra.get("kind", "")
         self._path_pub.publish(msg)
-        duration = float(times[-1]) if len(times) else 0.0
-        self.get_logger().info(f"Plan ready: {len(times)} points, {duration:.2f} s.")
+        duration = float(times[-1]) / speed if len(times) else 0.0
+        self.get_logger().info(f"Plan ready: {len(times)} points, {duration:.2f} s (speed {speed:.2f}).")
         self._publish_status(
             "planned",
             "plan ready; press Execute in plan mode",
             points=len(times),
             trajectory_duration_s=duration,
-            planning_time_s=time.monotonic() - plan_started,
+            planning_time_s=planning_time,
+            speed=speed,
             **extra,
         )
+
+    def _on_speed(self, msg):
+        speed = float(np.clip(msg.data, 0.05, 1.0))
+        if abs(speed - self._speed) < 1e-9:
+            return
+        self._speed = speed
+        self.get_logger().info(f"Execution speed {speed:.2f}")
+        if self._planned_msg is not None and self._unscaled_plan is not None and self._last_state == "planned":
+            self._publish_scaled_plan()  # the waiting plan at the new speed
 
     def _current_group_positions(self):
         self._latest_joint_positions = self._get_hardware_positions()
@@ -865,30 +910,82 @@ class FairinoPlanExecute(Node):
 
     def _solve_cartesian(self, request, q_now):
         """Samples the path, follows it with IK from the current configuration
-        and checks joint limits and self-collision (errors name the segment)."""
+        and checks joint limits and self-collision (errors name the segment).
+
+        A part of the path ("part": [first, last] waypoint indices) follows
+        the joint motion the whole path takes from its start, so it moves the
+        robot exactly as within the whole path. Returns the planned samples,
+        their joint positions, the planned segments, the first one's index and
+        the waypoints of the part."""
         waypoints, segments = path_from_payload(request)
         sampled = sample_path(waypoints, self._path_step, look_at=look_at_from_payload(request))
+        first, last = path_part(request, len(waypoints))
+        part = slice_path(sampled, first, last)
+        try:
+            lead = slice_path(sampled, 0, last)
+            path_q = self._path_ik.follow(lead, self._start_configuration(lead, q_now))
+            path_q = path_q[sampled.waypoint_samples[first]:]
+        except PathError as e:
+            if first == 0 or (e.segments and min(e.segments) >= first):
+                raise
+            # The path before the part is not reachable: the part starts
+            # from the configuration nearest to the current one.
+            self.get_logger().warn(f"path before waypoint {first + 1}: {e}; the part starts from the current configuration")
+            path_q = self._path_ik.follow(part, self._start_configuration(part, q_now))
+        self._check_path(path_q, part.segment)
+        return part, path_q, segments[first:last], first, waypoints[first:last + 1]
+
+    def _start_configuration(self, sampled, q_now):
+        """IK of the first sample within the joint limits: the nearest
+        solution (damped least squares from the current configuration), else
+        the one closest to it from other seeds (middle of the joint ranges,
+        fixed pseudo-random ones), else RoboPlan's IK. Solutions are moved by
+        whole turns toward the current configuration first: from a distant
+        seed the least squares can converge to angles of several turns."""
         start_pose = pin.SE3(quat_wxyz_to_matrix(sampled.wxyz[0]), sampled.positions[0])
-        # Nearest solution by damped least squares from the current
-        # configuration; RoboPlan's IK only if that does not converge.
-        q_start, error = self._path_ik.solve(start_pose, q_now)
-        if error > 1e-4:
-            goal = CartesianConfiguration()
-            goal.base_frame = self._base_link
-            goal.tip_frame = self._tip_link
-            goal.tform = start_pose.homogeneous
-            seed = JointConfiguration()
-            seed.positions = q_now
-            solution = JointConfiguration()
-            if not self._ik.solveIk(goal, seed, solution):
-                raise PathError("the first waypoint is not reachable", segments=[0])
-            q_start = np.asarray(solution.positions, dtype=float)
-        path_q = self._path_ik.follow(sampled, q_start)
-        self._check_path(path_q, sampled.segment)
-        return sampled, path_q, segments
+        rng = np.random.default_rng(0)
+        seeds = [q_now, 0.5 * (self._q_lower + self._q_upper)]
+        seeds += [rng.uniform(self._q_lower, self._q_upper) for _ in range(12)]
+        candidates = []
+        for n, seed in enumerate(seeds):
+            raw, error = self._path_ik.solve(start_pose, seed, iterations=30 if n == 0 else 100)
+            if error > 1e-4:
+                continue
+            q = self._within_limits(raw, q_now)
+            if q is None:
+                continue
+            if n == 0 and np.allclose(q, raw):
+                return q  # converged near the robot: keeps its branch
+            candidates.append(q)
+        if candidates:
+            return min(candidates, key=lambda q: float(np.max(np.abs(q - q_now))))
+        goal = CartesianConfiguration()
+        goal.base_frame = self._base_link
+        goal.tip_frame = self._tip_link
+        goal.tform = start_pose.homogeneous
+        seed = JointConfiguration()
+        seed.positions = q_now
+        solution = JointConfiguration()
+        if not self._ik.solveIk(goal, seed, solution):
+            raise PathError("the first waypoint is not reachable", segments=[int(sampled.segment[0])])
+        return np.asarray(solution.positions, dtype=float)
+
+    def _within_limits(self, q, q_ref):
+        """q moved by whole turns toward q_ref, inside the joint limits; None
+        if no such equivalent exists."""
+        turn = 2.0 * np.pi
+        q = q + turn * np.round((q_ref - q) / turn)
+        for j in range(len(q)):
+            for shift in (0.0, turn, -turn):
+                if self._q_lower[j] <= q[j] + shift <= self._q_upper[j]:
+                    q[j] += shift
+                    break
+            else:
+                return None
+        return q
 
     def _cartesian_path(self, request, q_now, scale):
-        sampled, path_q, segments = self._solve_cartesian(request, q_now)
+        sampled, path_q, segments, first, waypoints = self._solve_cartesian(request, q_now)
         timed = parameterize_path(
             path_q,
             sampled.length,
@@ -897,10 +994,21 @@ class FairinoPlanExecute(Node):
             self._qd_max,
             self._qdd_max,
             self._path_dt,
-            sampled.segment,
+            sampled.segment - first,
             [s.duration for s in segments],
         )
+        # Rests at waypoints (the robot stops there: stop sample); not at the
+        # start or the end of what is planned.
+        rests = [
+            (float(sum(timed.segment_planned_s[:j])), w.dwell)
+            for j, w in enumerate(waypoints)
+            if 0 < j < len(waypoints) - 1 and w.dwell > 0.0
+        ]
+        if rests:
+            timed = insert_dwells(timed, [t for t, _ in rests], [d for _, d in rests], self._path_dt)
+            timed.info["dwell_s"] = float(sum(d for _, d in rests))
         timed.info["samples"] = float(len(sampled.positions))
+        timed.info["first_segment"] = float(first)
         return path_q, timed
 
     def _on_path_check(self, msg):
@@ -909,7 +1017,7 @@ class FairinoPlanExecute(Node):
             request = json.loads(msg.data)
             result["request_id"] = request.get("request_id")
             q_now = self._current_group_positions()
-            sampled, path_q, _ = self._solve_cartesian(request, q_now)
+            sampled, path_q, _, first, _ = self._solve_cartesian(request, q_now)
             timed = parameterize_path(
                 path_q,
                 sampled.length,
@@ -918,7 +1026,7 @@ class FairinoPlanExecute(Node):
                 self._qd_max,
                 self._qdd_max,
                 self._path_dt,
-                sampled.segment,
+                sampled.segment - first,
             )
             result.update(ok=True, message="reachable", segment_fastest_s=[round(v, 3) for v in timed.segment_fastest_s])
         except PathError as e:
