@@ -475,6 +475,7 @@ class TimedTrajectory:
     info: dict
     segment_fastest_s: list = field(default_factory=list)
     segment_planned_s: list = field(default_factory=list)
+    waypoint_times_s: list = field(default_factory=list)  # arrival at each waypoint [s] (Cartesian paths)
 
 
 def _derivative(values: np.ndarray, s: np.ndarray) -> np.ndarray:

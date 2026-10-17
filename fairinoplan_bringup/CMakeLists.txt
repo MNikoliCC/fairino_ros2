@@ -24,6 +24,7 @@ install(
     scripts/fairino_trajectory_tools.py
     scripts/fairino_viser_trajectories.py
     scripts/fairino_viser_gizmo.py
+    scripts/fairino_viser_timeline.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

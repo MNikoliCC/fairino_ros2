@@ -781,8 +781,9 @@ class FairinoPlanExecute(Node):
         for key in ("approach_duration_s", "path_duration_s", "dwell_s"):
             if key in extra:
                 extra[key] = round(float(extra[key]) / speed, 4)
-        if "segment_planned_s" in extra:
-            extra["segment_planned_s"] = [round(v / speed, 3) for v in extra["segment_planned_s"]]
+        for key in ("segment_planned_s", "waypoint_times_s"):
+            if key in extra:
+                extra[key] = [round(v / speed, 4) for v in extra[key]]
         msg = self._make_trajectory_msg(times / speed, positions, velocities * speed)
         self._planned_msg = msg
         self._planned_kind = extra.get("kind", "")
@@ -858,6 +859,8 @@ class FairinoPlanExecute(Node):
                 times = np.concatenate([t_a, timed.times[1:] + t_a[-1]])
                 positions = np.vstack([p_a, timed.positions[1:]])
                 velocities = np.vstack([v_a, timed.velocities[1:]])
+            if timed.waypoint_times_s:
+                info["waypoint_times_s"] = [round(approach_s + t, 4) for t in timed.waypoint_times_s]
             self._publish_plan(
                 times,
                 positions,
@@ -1007,6 +1010,14 @@ class FairinoPlanExecute(Node):
         if rests:
             timed = insert_dwells(timed, [t for t, _ in rests], [d for _, d in rests], self._path_dt)
             timed.info["dwell_s"] = float(sum(d for _, d in rests))
+        # Arrival at every waypoint of the part (after the stops before it).
+        arrival, clock = [0.0], 0.0
+        for j, duration in enumerate(timed.segment_planned_s):
+            clock += float(duration)
+            arrival.append(clock)
+            if j + 1 < len(waypoints) - 1:
+                clock += waypoints[j + 1].dwell
+        timed.waypoint_times_s = arrival
         timed.info["samples"] = float(len(sampled.positions))
         timed.info["first_segment"] = float(first)
         return path_q, timed

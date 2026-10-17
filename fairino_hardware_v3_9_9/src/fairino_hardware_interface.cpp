@@ -69,6 +69,11 @@ int64_t robot_time_key(const ROBOT_STATE_PKG& pkg)
 // fields 3..75 at 8 ms, which omits safety door/plane, abnormal stop, UDP
 // state, driver alarms, speed scales and collision levels. The two string
 // fields (CurrentLuaFileName, AxleGenComData) are not needed.
+double finite_or_zero(double value)
+{
+    return std::isfinite(value) ? value : 0.0;
+}
+
 std::vector<RobotState> realtime_state_fields()
 {
     std::vector<RobotState> fields;
@@ -145,9 +150,10 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_init(const hardw
             return hardware_interface::CallbackReturn::ERROR;
         }
 
-        //关节状态部分
-        if (joint.state_interfaces.size() != 1) {
-            RCLCPP_FATAL(logger(), "Joint '%s' has %zu state interface. 1 expected.",
+        // State: position first; velocity and acceleration optional (the
+        // controller's actual_qd / actual_qdd from every CNDE frame).
+        if (joint.state_interfaces.empty() || joint.state_interfaces.size() > 3) {
+            RCLCPP_FATAL(logger(), "Joint '%s' has %zu state interfaces. 1 to 3 expected.",
                         joint.name.c_str(), joint.state_interfaces.size());
             return hardware_interface::CallbackReturn::ERROR;
         }
@@ -157,6 +163,14 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_init(const hardw
                         "Joint '%s' have %s state interface as first state interface. '%s' expected.", joint.name.c_str(),
                         joint.state_interfaces[0].name.c_str(), hardware_interface::HW_IF_POSITION);
             return hardware_interface::CallbackReturn::ERROR;
+        }
+        for (std::size_t k = 1; k < joint.state_interfaces.size(); ++k) {
+            const std::string& name = joint.state_interfaces[k].name;
+            if (name != hardware_interface::HW_IF_VELOCITY && name != hardware_interface::HW_IF_ACCELERATION) {
+                RCLCPP_FATAL(logger(), "Joint '%s' has state interface '%s'; only position, velocity and acceleration "
+                             "are supported.", joint.name.c_str(), name.c_str());
+                return hardware_interface::CallbackReturn::ERROR;
+            }
         }
     }
 
@@ -230,10 +244,18 @@ std::vector<hardware_interface::StateInterface> FairinoHardwareInterface::export
 {
   std::vector<hardware_interface::StateInterface> state_interfaces;
 
-  //导出关节相关的状态接口(位置，速度，扭矩)
+  // Joint position, and velocity / acceleration where the URDF declares them
+  // (FAIRINO actual_qd / actual_qdd, every CNDE frame).
   for (size_t i = 0; i < info_.joints.size(); ++i){
-    state_interfaces.emplace_back(hardware_interface::StateInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_POSITION, &_jnt_position_state[i]));
+    for (const auto& interface : info_.joints[i].state_interfaces) {
+      double* value = &_jnt_position_state[i];
+      if (interface.name == hardware_interface::HW_IF_VELOCITY) {
+        value = &_jnt_velocity_state[i];
+      } else if (interface.name == hardware_interface::HW_IF_ACCELERATION) {
+        value = &_jnt_acceleration_state[i];
+      }
+      state_interfaces.emplace_back(hardware_interface::StateInterface(info_.joints[i].name, interface.name, value));
+    }
   }
 
   //导出
@@ -270,6 +292,7 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
         _jnt_torque_command[i] = 0;
         _jnt_position_state[i] = 0;
         _jnt_velocity_state[i] = 0;
+        _jnt_acceleration_state[i] = 0;
         _jnt_torque_state[i] = 0;
     }
     _control_mode = 0;//默认是位置控制,0-位置控制，1-扭矩控制 2-速度控制
@@ -354,6 +377,8 @@ hardware_interface::CallbackReturn FairinoHardwareInterface::on_activate(const r
     }
     for (int j = 0; j < 6; ++j) {
         _jnt_position_state[j] = pkg.jt_cur_pos[j] * kDegToRad;
+        _jnt_velocity_state[j] = finite_or_zero(pkg.actual_qd[j]) * kDegToRad;
+        _jnt_acceleration_state[j] = finite_or_zero(pkg.actual_qdd[j]) * kDegToRad;
         _jnt_position_command[j] = _jnt_position_state[j];
         last_sent_command_[j] = _jnt_position_state[j];
         previous_command_[j] = _jnt_position_state[j];
@@ -500,6 +525,9 @@ hardware_interface::return_type FairinoHardwareInterface::read(const rclcpp::Tim
     if (returncode == 0 && frame_fresh) {
         for(int i=0;i<6;i++){
             _jnt_position_state[i] = pkg.jt_cur_pos[i] * kDegToRad;//注意单位转换，moveit统一用弧度
+            // Measured by the controller (deg/s, deg/s^2) -> rad/s, rad/s^2.
+            _jnt_velocity_state[i] = finite_or_zero(pkg.actual_qd[i]) * kDegToRad;
+            _jnt_acceleration_state[i] = finite_or_zero(pkg.actual_qdd[i]) * kDegToRad;
         }
         consecutive_read_errors_ = 0;
         last_good_read_time_ = now;

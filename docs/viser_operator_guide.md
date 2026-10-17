@@ -73,9 +73,57 @@ FAIRINO TCP (`tl_cur_pos`, mm and rx/ry/rz in deg) and their difference
 the flange and the Status tab says so.
 
 The `base_link` axes (25 cm, labelled) mark the frame of every pose and
-offset in the UI. Bottom left: the browser's frame rate and the longest
+offset in the UI. Top centre: the browser's frame rate and the longest
 frame of the last second (`60 fps · max frame 20 ms`), measured in the page;
 a low value means the browser/GPU is slow, it does not affect the robot.
+
+**Trajectory timeline** (panel along the bottom, from the left edge to the
+control panel; `–` minimizes it): uPlot charts of the plan that waits for
+Execute (path, segments, gizmo, Home, replay) over time, at the chosen
+*Speed*. *Show* **☑ TCP / ☐ Positions / ☐ Velocities / ☐ Accelerations**
+picks any combination; the charts are stacked (the panel grows upward with
+each one), share the time axis (shown on the bottom chart) and the cursor:
+hovering one marks the same instant on all, and every legend shows the
+values there. Dragging over a chart zooms the time of all charts; double
+click resets. *Joints* (row at the bottom of the panel) **☑ 🟧 j1 … ☑ 🟨
+j6** show or hide a joint on all joint charts together with its limit lines
+and its number in the limit labels (a limit no visible joint has disappears);
+**☑ planned / ☑ measured** show or hide the planned and the measured curves
+on all charts (TCP included), e.g. only the measured motion. The choice is
+kept by the server, so a zoom or a new plan keeps it (the legend only shows
+values and is not clickable).
+
+| Chart | Plan (solid) | Measured after Execute (dashed) |
+|---|---|---|
+| TCP | TCP speed [mm/s] from the planned joints; a yellow dot at each waypoint arrival; the same ticks on both sides | TCP speed from the measured positions |
+| Positions | j1–j6 [deg]; ticks only at 0 (grey dashed line) and the joint limits (URDF); each joint's range as dashed lines in its colour (coinciding ranges use long, short and dotted dashes) | `/joint_states` positions |
+| Velocities | j1–j6 [deg/s]; ticks only at 0 and the limits (120 for j1–j3, 180 for j4–j6), as grey dashed lines | the controller's `actual_qd` |
+| Accelerations | j1–j6 [deg/s²] (derivative of the planned velocities); ticks at 0 and ±540 (the same limit for all joints) | the controller's `actual_qdd` |
+
+Limit labels name the joints they hold for, shared limits once, with the
+joint numbers in the joints' colours (`j` and the value grey): on the left
+the joints first, so the value is next to the chart (`j2,4 85`), on the
+right the value first (`85 j2,4`). Every limit is on the left unless it would
+overlap another label there (positions: 175 and 162), then on the right; the
+right side repeats the labels wherever they fit. The labels use a monospace
+font: each colour is drawn by its own overlaid axis (uPlot draws a tick label
+in one colour). All charts have the same axis widths, so their time axes line
+up.
+
+Waypoint numbers stand above the top chart, with a faint dashed line down
+through all charts (numbers closer than 16 px are left out, the line stays;
+a stop shows as TCP speed 0 between two dots). The title says what is planned,
+its duration and the waypoints shown, and once the last Execute of this plan
+is drawn `dashed: measured, executed 1.94 s, shown 38 ms earlier (feedback
+delay)`: the measured motion is shifted by the delay that fits the planned
+joint positions best (0–300 ms; the controller and feedback delay), so plan,
+measurement and waypoint times line up. A new plan removes the measured lines; with *Plan
+continuously* that happens as soon as the robot rests elsewhere. The y range
+covers the plan and the measured values without their 0.5 % most extreme
+samples, so SimMachine's catch-up spikes leave the chart instead of
+flattening it; the velocity and acceleration charts always show their limits
+(measured spikes beyond 1.3× the limit leave the chart). Joint colours: j1 orange, j2 green, j3 blue, j4 purple, j5 red, j6
+yellow. Every browser gets its own panel, sized to its window.
 
 The UI starts in dark mode. Viser's **Share** button (top right of the
 panel, UI node parameter `show_share_button`, default `true`) creates a

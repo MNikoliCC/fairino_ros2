@@ -31,12 +31,14 @@ from pinocchio.visualize import ViserVisualizer
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from control_msgs.msg import DynamicJointState
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64, String
 from std_srvs.srv import SetBool, Trigger
 from trajectory_msgs.msg import JointTrajectory
 
 from fairino_viser_gizmo import TargetGizmo
+from fairino_viser_timeline import Motion, TrajectoryTimeline
 from fairino_viser_trajectories import PathEditor, RecordingPanel, axes_options, resolve_trajectory_dir
 
 
@@ -82,7 +84,7 @@ def fmt_age(value: float) -> str:
 FPS_OVERLAY_HTML = """<img src="data:," style="display:none" onerror="
 if(!document.getElementById('fps-overlay')){
 const d=document.createElement('div');d.id='fps-overlay';
-d.style.cssText='position:fixed;left:64px;bottom:10px;z-index:1000;font:11px monospace;color:#888;pointer-events:none';
+d.style.cssText='position:fixed;left:50%;top:8px;transform:translateX(-50%);z-index:1000;font:11px monospace;color:#888;pointer-events:none';
 document.body.appendChild(d);let n=0,t0=performance.now(),worst=0,last=t0;
 const f=(t)=>{n++;worst=Math.max(worst,t-last);last=t;
 if(t-t0>=1000){d.textContent=(n*1000/(t-t0)).toFixed(0)+' fps · max frame '+worst.toFixed(0)+' ms';n=0;t0=t;worst=0;}
@@ -236,6 +238,12 @@ class FairinoViserUi(Node):
         self._preview_positions: np.ndarray | None = None
         self._preview_start = 0.0
         self._preview_shown = False
+        # Timeline chart: planned times, TCP speed [mm/s], joints [deg].
+        self._timeline_plan: Motion | None = None
+        self._timeline_key = None
+        # Measured motion during an Execute (for the timeline): joint states
+        # (stamp, q, qd) and accelerations (stamp, qdd), time 0 = Execute.
+        self._exec_record: dict | None = None
         self._last_result = "—"
         self._start_time = self.get_clock().now()
 
@@ -252,6 +260,8 @@ class FairinoViserUi(Node):
         self.path_check_pub = self.create_publisher(String, "/fairinoplan/path_check", 1)
         self._speed_pub = self.create_publisher(Float64, "/fairinoplan/speed_scale", LATCHED)
         self.create_subscription(JointState, "/joint_states", self._on_joint_state, 1)
+        # Measured joint accelerations (actual_qdd), recorded during Execute.
+        self.create_subscription(DynamicJointState, "/dynamic_joint_states", self._on_dynamic_joint_state, 10)
         self.create_subscription(ServoStatus, "/fairino_servo/status", self._on_servo_status, 5)
         self.create_subscription(RobotStatus, "/fairino_robot/status", self._on_robot_status, 5)
         self.create_subscription(
@@ -356,8 +366,15 @@ class FairinoViserUi(Node):
             control_width="large", brand_color=(30, 110, 200), show_logo=False, dark_mode=True,
             show_share_button=bool(self.get_parameter("show_share_button").value),
         )
-        # Browser frame rate, bottom left of the 3D view (measured by the page).
+        # Browser frame rate, top centre of the 3D view (measured by the page).
         gui.add_html(FPS_OVERLAY_HTML)
+        # Bottom: the planned trajectory over time (one panel per browser).
+        limits = [
+            (float(np.degrees(self._model.lowerPositionLimit[self._joint_q_index[name]])),
+             float(np.degrees(self._model.upperPositionLimit[self._joint_q_index[name]])))
+            for name in JOINT_NAMES
+        ]
+        self._timeline = TrajectoryTimeline(self._server, limits)
         # Top left (floating window): state, controller, last command, and
         # the fault with Recover only when there is one.
         self._status_panel = gui.add_panel()
@@ -521,6 +538,83 @@ class FairinoViserUi(Node):
         if stamp <= 0.0:
             stamp = time.monotonic()
         self.recorder.on_joint_state(stamp, np.asarray(values))
+        record = self._exec_record
+        if record is not None:
+            velocity = dict(zip(msg.name, msg.velocity)) if len(msg.velocity) == len(msg.name) else {}
+            record["js"].append((stamp, values, [float(velocity.get(name, np.nan)) for name in JOINT_NAMES]))
+
+    def _on_dynamic_joint_state(self, msg: DynamicJointState) -> None:
+        record = self._exec_record
+        if record is None:
+            return
+        acc = []
+        for name in JOINT_NAMES:
+            if name not in msg.joint_names:
+                return
+            values = msg.interface_values[msg.joint_names.index(name)]
+            if "acceleration" not in values.interface_names:
+                return
+            acc.append(float(values.values[values.interface_names.index("acceleration")]))
+        record["acc"].append((msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9, acc))
+
+    def _record_execution(self, status: dict) -> None:
+        """Execute: record the measured motion; when it ends, draw it over
+        the plan in the timeline."""
+        state = status.get("state")
+        if state == "executing":
+            self._exec_record = {"t0": float(status.get("stamp", time.time())), "plan": self._timeline_plan, "js": [], "acc": []}
+        elif state in ("succeeded", "failed") and self._exec_record is not None:
+            record, self._exec_record = self._exec_record, None
+            threading.Thread(target=self._safe(lambda: self._finish_record(record, state)), daemon=True).start()
+
+    def _finish_record(self, record: dict, state: str) -> None:
+        if len(record["js"]) < 3 or record["plan"] is not self._timeline_plan:
+            return  # nothing recorded, or another plan meanwhile
+        t = np.array([s for s, _, _ in record["js"]]) - record["t0"]
+        q = np.array([v for _, v, _ in record["js"]])
+        qd = np.array([v for _, _, v in record["js"]])
+        if record["acc"]:
+            ta = np.array([s for s, _ in record["acc"]]) - record["t0"]
+            a = np.array([v for _, v in record["acc"]])
+            qdd = np.stack([np.interp(t, ta, a[:, j]) for j in range(6)], axis=1)
+        else:
+            qdd = np.full_like(q, np.nan)
+        # TCP speed from the measured positions (frames whose position did
+        # not change are repeated feedback, not a stop).
+        data = self._model.createData()
+        full = self._q.copy()
+        tcp = np.empty((len(t), 3))
+        for k in range(len(t)):
+            for name, value in zip(JOINT_NAMES, q[k]):
+                full[self._joint_q_index[name]] = value
+            pin.framesForwardKinematics(self._model, data, full)
+            tcp[k] = data.oMf[self._tip_frame].translation
+        fresh = np.concatenate([[True], np.any(np.abs(np.diff(q, axis=0)) > 1e-9, axis=1)])
+        tf = t[fresh]
+        speed_f = np.linalg.norm(np.gradient(tcp[fresh], axis=0), axis=1) / np.maximum(np.gradient(tf), 1e-6) * 1000.0
+        speed = np.interp(t, tf, speed_f) if len(tf) > 1 else np.zeros(len(t))
+        # The robot follows the plan with the controller and feedback delay:
+        # shift the measured motion by the delay that fits the planned joint
+        # positions best (0-300 ms), so both share the waypoint times.
+        plan = record["plan"]
+        lags = np.arange(0.0, 0.3, 0.002)
+        errors = []
+        for lag in lags:
+            inside = (plan.times + lag >= t[0]) & (plan.times + lag <= t[-1])
+            if inside.sum() < 10:
+                errors.append(np.inf)
+                continue
+            shifted = np.stack([np.interp(plan.times[inside] + lag, t, np.degrees(q[:, j])) for j in range(6)], axis=1)
+            errors.append(float(np.mean(np.abs(shifted - plan.q[inside]))))
+        lag = float(lags[int(np.argmin(errors))]) if np.isfinite(np.min(errors)) else 0.0
+        moving = np.max(np.abs(qd), axis=1) > np.radians(0.5)
+        executed = float(t[np.flatnonzero(moving)[-1]] - lag) if moving.any() else float(plan.times[-1])
+        measured = Motion(t - lag, speed, np.degrees(q), np.degrees(qd), np.degrees(qdd))
+        self._timeline.set_measured(
+            measured,
+            f"dashed: measured, executed {executed:.2f} s, shown {1000.0 * lag:.0f} ms earlier (feedback delay)"
+            + ("" if state == "succeeded" else " · execution failed"),
+        )
 
     def _on_servo_status(self, msg: ServoStatus) -> None:
         with self._lock:
@@ -549,6 +643,8 @@ class FairinoViserUi(Node):
             if status.get("tracking"):
                 self._last_tracking = dict(status["tracking"], kind=status.get("kind", ""), state=status.get("state"))
         self.path_editor.on_plan_status(status)
+        self._record_execution(status)
+        self._update_timeline()
 
     def _on_path_check(self, msg: String) -> None:
         try:
@@ -837,6 +933,8 @@ class FairinoViserUi(Node):
             with self._lock:
                 self._preview_times = None
                 self._preview_positions = None
+                self._timeline_plan = None
+            self._update_timeline()
             return
         indices = [msg.joint_names.index(name) for name in JOINT_NAMES if name in msg.joint_names]
         if len(indices) != len(JOINT_NAMES):
@@ -865,10 +963,48 @@ class FairinoViserUi(Node):
         )
         times = np.array([p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in msg.points])
         positions = np.array([[p.positions[i] for i in indices] for p in msg.points])
+        speed = np.linalg.norm(np.gradient(tcp, axis=0), axis=1) / np.maximum(np.gradient(times), 1e-9) * 1000.0
+        if all(len(p.velocities) == len(msg.joint_names) for p in msg.points):
+            velocities = np.array([[p.velocities[i] for i in indices] for p in msg.points])
+        else:
+            velocities = np.gradient(positions, times, axis=0)
+        accelerations = np.gradient(velocities, times, axis=0)
+        plan = Motion(times, speed, np.degrees(positions), np.degrees(velocities), np.degrees(accelerations))
         with self._lock:
             self._preview_times = times
             self._preview_positions = positions
             self._preview_start = time.monotonic()
+            self._timeline_plan = plan
+        self._update_timeline()
+
+    def _update_timeline(self) -> None:
+        """Timeline chart from the planned trajectory and, when the plan status
+        belongs to it (same duration), the waypoint arrival times."""
+        with self._lock:
+            plan = self._timeline_plan
+            status = dict(self._plan_status)
+        if plan is None:
+            if self._timeline_key is not None:
+                self._timeline_key = None
+                self._timeline.clear()
+            return
+        if "trajectory_duration_s" not in status and self._timeline_key is not None and self._timeline_key[0] == id(plan):
+            return  # executing / executed: the chart keeps the plan's title and waypoints
+        duration = float(plan.times[-1])
+        matches = abs(float(status.get("trajectory_duration_s", -1.0)) - duration) < 0.01
+        marks = list(status.get("waypoint_times_s", [])) if matches else []
+        key = (id(plan), tuple(marks), matches)
+        if key == self._timeline_key:
+            return
+        self._timeline_key = key
+        what = self._plan_what(status) if matches else "plan"
+        first = int(status.get("first_segment", 0)) + 1
+        title = f"Planned trajectory: {what} · {duration:.2f} s"
+        if matches and status.get("speed", 1.0) < 0.999:
+            title += f" · speed {status['speed']:.2f}"
+        if marks:
+            title += f" · ● waypoints {first}–{first + len(marks) - 1}"
+        self._timeline.set_plan(plan, marks, title, first_waypoint=first)
 
     # ------------------------------------------------------------ kinematics
     def _world_poses(self) -> tuple[pin.SE3, pin.SE3]:
@@ -1189,15 +1325,19 @@ class FairinoViserUi(Node):
             text += f" · ⚠️ below {expected:.0f}/s: joints reach at most {100.0 * rate / expected:.0f} % of v_max"
         return text
 
-    def _plan_text(self, plan: dict) -> str:
-        """What is planned (path, segments, gizmo, Home, replay), its state
-        and duration, in two short lines."""
-        state = plan.get("state", "?")
-        what = {
+    def _plan_what(self, plan: dict) -> str:
+        """What a plan is: "path 1→6", "segments 4→5", "home", "replay …"."""
+        return {
             "joint_goal": self._last_joint_plan,
             "joint_path": f"replay {self.recorder.loaded_name()}",
             "cartesian_path": self.path_editor.plan_label() or "path",
         }.get(plan.get("kind"), "")
+
+    def _plan_text(self, plan: dict) -> str:
+        """What is planned (path, segments, gizmo, Home, replay), its state
+        and duration, in two short lines."""
+        state = plan.get("state", "?")
+        what = self._plan_what(plan)
         if state in ("ready", "unknown") or not what:
             return "Nothing planned." if state != "unknown" else plan.get("message", "")
         verb = {"planning": "Planning", "planned": "Planned", "executing": "Executing",

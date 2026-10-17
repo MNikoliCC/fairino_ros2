@@ -59,6 +59,10 @@ fairino_plan_execute.py (plan mode): SimpleIk + RRT + shortcutting + TOPP-RA →
     self-collision, timing) with an RRT approach, same preview/Execute
 fairino_viser_trajectories.py (in the UI process): recording from /joint_states, library,
   replay requests, path editor; fairino_trajectory_tools.py: geometry, IK, timing, files
+fairino_viser_gizmo.py: servo and trajectory gizmos; fairino_viser_timeline.py: uPlot
+  timeline (TCP, joint positions, velocities, accelerations; plan and the measured
+  motion of the last Execute from /joint_states and /dynamic_joint_states; one bottom
+  panel per browser, sized from a width report of the page through a hidden field)
 ```
 
 ### 1.1 Single owner of the FAIRINO SDK
@@ -239,7 +243,8 @@ and OInK keep tracking the last valid target.
 
 | Topic | Type | Publisher → subscriber |
 |---|---|---|
-| `/joint_states` | `sensor_msgs/JointState` | broadcaster → servo, UI, planner. Order is j1,j2,j4,j5,j3,j6: always mapped by name |
+| `/joint_states` | `sensor_msgs/JointState` | broadcaster → servo, UI, planner. Order is j1,j2,j4,j5,j3,j6: always mapped by name. `position` and `velocity` (the controller's `actual_qd`, rad/s) |
+| `/dynamic_joint_states` | `control_msgs/DynamicJointState`, 250 Hz | broadcaster: every state interface per joint: `position`, `velocity`, `acceleration` (the controller's `actual_qdd`, rad/s²; `JointState` has no acceleration field) |
 | `/fairino_servo/target_pose` | `geometry_msgs/PoseStamped` in `base_link` | UI (or benchmark) → servo |
 | `/fairino_servo/reset_target_pose` | `PoseStamped`, latched | servo → UI (gizmo jumps to the synchronized TCP) |
 | `/fairino_servo/set_free_tool_roll` | service `std_srvs/SetBool` | UI (point tracking) → servo: `true` = track only the position and the tool z axis (roll free), `false` = full pose; effective in the next cycle in any state, audited, reported as `free_tool_roll` in `/fairino_servo/status`. The UI enables point tracking only after the servo confirms; it requests `false` once when it starts and re-requests `true` if the servo restarted while tracking is on (it never forces `false`, so other clients such as the benchmark can use the mode) |
@@ -253,6 +258,7 @@ and OInK keep tracking the last valid target.
 | `/fairinoplan/path_goal` | `std_msgs/String` (JSON: `joint_path` or `cartesian_path`) | UI → planner ([trajectory_recording_and_paths.md](trajectory_recording_and_paths.md)) |
 | `/fairinoplan/path_check` → `/fairinoplan/path_check_result` | `std_msgs/String` (JSON) | UI ↔ planner: reachability and fastest time per segment while drawing; no plan is made |
 | `/fairinoplan/status` | `std_msgs/String` (JSON), latched | planner → UI |
+| `/fairinoplan/status` fields for plans | `trajectory_duration_s`, `approach_duration_s`, `path_duration_s`, `segment_planned_s`, `waypoint_times_s` (arrival at each waypoint of a Cartesian plan, incl. the approach and stops), `first_segment`, `speed` (all times at the execution speed) | planner → UI (plan line, editor, timeline chart) |
 | `/fairinoplan/speed_scale` | `std_msgs/Float64` (0.05–1), latched | UI → planner: execution speed; every plan is published and executed with its times divided by it, a waiting plan is published again when it changes |
 | `/fairinoplan/planned_path` | `trajectory_msgs/JointTrajectory`, latched | planner → UI (drawn in Viser) |
 
@@ -324,6 +330,21 @@ refused while SYNCING or RECOVERING, and synchronization requests are
 serialized (the worker and the service never share a request slot). The UI
 has no Reset Target button any more (its gizmo is put on the TCP on every
 enable/resume); the service `/fairino_servo/reset_target` remains for scripts.
+
+**Measured joint velocity and acceleration.** The hardware plugin exports,
+besides `position`, the state interfaces `velocity` and `acceleration` (as
+declared in the ros2_control xacro), filled in `read()` from the same CNDE
+frame as the position: `actual_qd` and `actual_qdd` (deg/s, deg/s² → rad/s,
+rad/s²; non-finite → 0). FAIRINO's original plugin exported only `position`
+(velocity and effort were commented out, acceleration absent). The controllers
+still use position only. Measured on SimMachine during a 12.35 s path:
+`/joint_states` and `/dynamic_joint_states` at 250 Hz; `actual_qd` reaches
+the planned speeds (≤ 120/180 deg/s) but repeats in 60 % of the moving frames
+(the simulator updates its state about every second or third frame), and
+`actual_qdd` follows the planned acceleration in smooth phases (≈ 350
+deg/s² on j4) with spikes (p95 1000–2500, p99 up to 6000 deg/s², planned ≤
+540) where the simulator catches up; differentiating `actual_qd` gives up to
+12 800 deg/s² even after a 40 ms average. To be measured on the real robot.
 
 **Hardware streaming supervision**: in ACTIVE and HOLD the servo requires
 streaming `ARMED`; anything else (an external `/fairino_robot/stop`, a manual
